@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"go-fbx/internal/format"
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 var journalMagic = [4]byte{'J', 'N', 'L', '1'}

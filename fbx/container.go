@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"go-fbx/internal/format"
-	"go-fbx/internal/pathutil"
+	"github.com/pixfid/go-fbx/internal/format"
+	"github.com/pixfid/go-fbx/internal/pathutil"
 )
 
 type Container struct {

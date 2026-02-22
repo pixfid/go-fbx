@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go-fbx/internal/pathutil"
+	"github.com/pixfid/go-fbx/internal/pathutil"
 )
 
 type ZIPImportOptions struct {

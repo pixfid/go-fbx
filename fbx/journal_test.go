@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go-fbx/internal/format"
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 func TestJournalRecordRoundTrip(t *testing.T) {

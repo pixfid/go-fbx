@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go-fbx/fbx"
+	"github.com/pixfid/go-fbx/fbx"
 )
 
 func main() {
