@@ -1,15 +1,22 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go-fbx/fbx"
 )
@@ -22,6 +29,8 @@ func main() {
 	switch os.Args[1] {
 	case "convert-zip":
 		os.Exit(runConvertZip(os.Args[2:]))
+	case "interactive":
+		os.Exit(runInteractive(os.Args[2:]))
 	case "pack":
 		os.Exit(runPack(os.Args[2:]))
 	case "add":
@@ -58,6 +67,7 @@ func usage() {
 
 Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
+  fbx interactive [--max-entry-size bytes] [--max-chunk-size bytes] [container.fbx]
   fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
@@ -136,6 +146,494 @@ func runConvertZip(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+type interactiveSession struct {
+	c             *fbx.Container
+	containerPath string
+	cwd           string
+	opts          *fbx.Options
+	out           io.Writer
+	errOut        io.Writer
+	lastViewPath  string
+	lastViewOff   uint64
+	lastViewSize  int
+	lastViewShown int
+}
+
+func runInteractive(args []string) int {
+	fs := flag.NewFlagSet("interactive", flag.ContinueOnError)
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, "interactive accepts at most one optional <container.fbx>")
+		return 2
+	}
+	copts, err := buildLimitOptions(*maxEntrySize, *maxChunkSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	s := &interactiveSession{
+		opts:         copts,
+		out:          os.Stdout,
+		errOut:       os.Stderr,
+		lastViewSize: 1024,
+	}
+	if fs.NArg() == 1 {
+		if err := s.openContainer(fs.Arg(0)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "interactive mode; type 'help' for commands")
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for {
+		fmt.Fprint(os.Stderr, s.prompt())
+		if !sc.Scan() {
+			fmt.Fprintln(os.Stderr)
+			break
+		}
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		exit, code := s.runCommand(line)
+		if code != 0 {
+			continue
+		}
+		if exit {
+			break
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		s.closeContainer()
+		return 1
+	}
+	s.closeContainer()
+	return 0
+}
+
+func (s *interactiveSession) prompt() string {
+	if s.c == nil {
+		return "fbx> "
+	}
+	base := filepath.Base(s.containerPath)
+	if s.cwd == "" {
+		return fmt.Sprintf("fbx[%s:/]> ", base)
+	}
+	return fmt.Sprintf("fbx[%s:/%s]> ", base, s.cwd)
+}
+
+func (s *interactiveSession) runCommand(line string) (bool, int) {
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return false, 0
+	}
+	cmd := strings.ToLower(parts[0])
+	switch cmd {
+	case "help", "?":
+		fmt.Fprintln(s.out, "commands: help, open <fbx>, close, pwd, cd <path>, ls [path], stat <entry>, cat <entry> [offset] [size], next, prev, rm <entry>, exit")
+		return false, 0
+	case "exit", "quit":
+		return true, 0
+	case "open":
+		if len(parts) != 2 {
+			fmt.Fprintln(s.errOut, "open requires <container.fbx>")
+			return false, 2
+		}
+		if err := s.openContainer(parts[1]); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		fmt.Fprintf(s.out, "opened %s\n", s.containerPath)
+		return false, 0
+	case "close":
+		s.closeContainer()
+		fmt.Fprintln(s.out, "closed")
+		return false, 0
+	case "pwd":
+		if s.cwd == "" {
+			fmt.Fprintln(s.out, "/")
+			return false, 0
+		}
+		fmt.Fprintf(s.out, "/%s\n", s.cwd)
+		return false, 0
+	case "cd":
+		if len(parts) != 2 {
+			fmt.Fprintln(s.errOut, "cd requires <path>")
+			return false, 2
+		}
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		next, err := s.resolveCD(parts[1])
+		if err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		if !s.prefixExists(next) {
+			fmt.Fprintln(s.errOut, "path not found")
+			return false, 1
+		}
+		s.cwd = next
+		return false, 0
+	case "ls":
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		target := s.cwd
+		if len(parts) >= 2 {
+			var err error
+			target, err = s.resolveCD(parts[1])
+			if err != nil {
+				fmt.Fprintln(s.errOut, err)
+				return false, 1
+			}
+		}
+		if err := s.listPrefix(target); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		return false, 0
+	case "stat":
+		if len(parts) != 2 {
+			fmt.Fprintln(s.errOut, "stat requires <entry>")
+			return false, 2
+		}
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		p, err := s.resolveEntry(parts[1])
+		if err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		info, err := s.c.Stat(p)
+		if err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		fmt.Fprintf(s.out, "path=%s\nsize=%d\nmtime_unix=%d\nmode=%#o\nflags=%d\nmeta_size=%d\n", info.Path, info.Size, info.MTimeUnix, info.Mode, info.Flags, len(info.Meta))
+		if len(info.Meta) > 0 {
+			if json.Valid(info.Meta) {
+				fmt.Fprintf(s.out, "meta_json=%s\n", string(info.Meta))
+			} else if utf8.Valid(info.Meta) {
+				fmt.Fprintf(s.out, "meta_text=%s\n", string(info.Meta))
+			} else {
+				fmt.Fprintf(s.out, "meta_hex=%s\n", hex.EncodeToString(info.Meta))
+			}
+		}
+		return false, 0
+	case "cat":
+		if len(parts) < 2 || len(parts) > 4 {
+			fmt.Fprintln(s.errOut, "cat requires <entry> [offset] [size]")
+			return false, 2
+		}
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		p, err := s.resolveEntry(parts[1])
+		if err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		off := uint64(0)
+		size := s.lastViewSize
+		if len(parts) >= 3 {
+			v, err := strconv.ParseUint(parts[2], 10, 64)
+			if err != nil {
+				fmt.Fprintln(s.errOut, "offset must be uint")
+				return false, 2
+			}
+			off = v
+		}
+		if len(parts) == 4 {
+			v, err := strconv.Atoi(parts[3])
+			if err != nil || v <= 0 {
+				fmt.Fprintln(s.errOut, "size must be > 0")
+				return false, 2
+			}
+			size = v
+		}
+		if err := s.viewChunk(p, off, size); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		return false, 0
+	case "next":
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		if s.lastViewPath == "" {
+			fmt.Fprintln(s.errOut, "nothing to continue; use cat first")
+			return false, 2
+		}
+		off := s.lastViewOff + uint64(s.lastViewShown)
+		if err := s.viewChunk(s.lastViewPath, off, s.lastViewSize); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		return false, 0
+	case "prev":
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		if s.lastViewPath == "" {
+			fmt.Fprintln(s.errOut, "nothing to continue; use cat first")
+			return false, 2
+		}
+		var off uint64
+		if s.lastViewOff > uint64(s.lastViewSize) {
+			off = s.lastViewOff - uint64(s.lastViewSize)
+		}
+		if err := s.viewChunk(s.lastViewPath, off, s.lastViewSize); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		return false, 0
+	case "rm":
+		if len(parts) != 2 {
+			fmt.Fprintln(s.errOut, "rm requires <entry>")
+			return false, 2
+		}
+		if err := s.requireOpen(); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		p, err := s.resolveEntry(parts[1])
+		if err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		if err := s.c.Remove(p); err != nil {
+			fmt.Fprintln(s.errOut, err)
+			return false, 1
+		}
+		if s.lastViewPath == p {
+			s.lastViewPath = ""
+			s.lastViewOff = 0
+			s.lastViewShown = 0
+		}
+		fmt.Fprintf(s.out, "removed %s\n", p)
+		return false, 0
+	default:
+		fmt.Fprintln(s.errOut, "unknown command; use 'help'")
+		return false, 2
+	}
+}
+
+func (s *interactiveSession) openContainer(p string) error {
+	c, err := fbx.Open(p, s.opts)
+	if err != nil {
+		return err
+	}
+	if s.c != nil {
+		_ = s.c.Close()
+	}
+	s.c = c
+	s.containerPath = p
+	s.cwd = ""
+	s.lastViewPath = ""
+	s.lastViewOff = 0
+	s.lastViewShown = 0
+	return nil
+}
+
+func (s *interactiveSession) closeContainer() {
+	if s.c != nil {
+		_ = s.c.Close()
+		s.c = nil
+	}
+	s.containerPath = ""
+	s.cwd = ""
+	s.lastViewPath = ""
+	s.lastViewOff = 0
+	s.lastViewShown = 0
+}
+
+func (s *interactiveSession) requireOpen() error {
+	if s.c == nil {
+		return fmt.Errorf("no container is open; use open <container.fbx>")
+	}
+	return nil
+}
+
+func (s *interactiveSession) resolveCD(arg string) (string, error) {
+	arg = strings.TrimSpace(strings.ReplaceAll(arg, "\\", "/"))
+	if arg == "" || arg == "." {
+		return s.cwd, nil
+	}
+	if arg == "/" {
+		return "", nil
+	}
+	base := s.cwd
+	if strings.HasPrefix(arg, "/") {
+		base = ""
+		arg = strings.TrimLeft(arg, "/")
+	}
+	joined := path.Clean(path.Join("/", base, arg))
+	if !strings.HasPrefix(joined, "/") {
+		return "", fmt.Errorf("invalid path")
+	}
+	out := strings.TrimPrefix(joined, "/")
+	if out == "." {
+		return "", nil
+	}
+	if out == "" {
+		return "", nil
+	}
+	for _, part := range strings.Split(out, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid path")
+		}
+	}
+	return out, nil
+}
+
+func (s *interactiveSession) resolveEntry(arg string) (string, error) {
+	p, err := s.resolveCD(arg)
+	if err != nil {
+		return "", err
+	}
+	if p == "" {
+		return "", fmt.Errorf("entry path is required")
+	}
+	return p, nil
+}
+
+func (s *interactiveSession) prefixExists(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	if _, err := s.c.Stat(prefix); err == nil {
+		return true
+	}
+	it := s.c.List()
+	want := prefix + "/"
+	for it.Next() {
+		if strings.HasPrefix(it.Value().Path, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *interactiveSession) listPrefix(prefix string) error {
+	dirs := map[string]struct{}{}
+	files := make([]fbx.EntryInfo, 0)
+	var targetFile *fbx.EntryInfo
+	if prefix != "" {
+		if info, err := s.c.Stat(prefix); err == nil {
+			cp := info
+			targetFile = &cp
+		}
+	}
+	it := s.c.List()
+	fullPrefix := prefix
+	if fullPrefix != "" {
+		fullPrefix += "/"
+	}
+	for it.Next() {
+		e := it.Value()
+		rel := e.Path
+		if prefix != "" {
+			if e.Path == prefix {
+				continue
+			}
+			if !strings.HasPrefix(e.Path, fullPrefix) {
+				continue
+			}
+			rel = strings.TrimPrefix(e.Path, fullPrefix)
+		}
+		if rel == "" {
+			continue
+		}
+		if i := strings.IndexByte(rel, '/'); i >= 0 {
+			dirs[rel[:i]] = struct{}{}
+			continue
+		}
+		e.Path = rel
+		files = append(files, e)
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	if targetFile != nil && len(dirs) == 0 && len(files) == 0 {
+		fmt.Fprintf(s.out, "%12d  %s\n", targetFile.Size, path.Base(targetFile.Path))
+		return nil
+	}
+	dirNames := make([]string, 0, len(dirs))
+	for d := range dirs {
+		dirNames = append(dirNames, d)
+	}
+	sort.Strings(dirNames)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	if len(dirNames) == 0 && len(files) == 0 {
+		fmt.Fprintln(s.out, "(empty)")
+		return nil
+	}
+	for _, d := range dirNames {
+		fmt.Fprintf(s.out, "%12s  %s/\n", "-", d)
+	}
+	for _, f := range files {
+		fmt.Fprintf(s.out, "%12d  %s\n", f.Size, f.Path)
+	}
+	return nil
+}
+
+func (s *interactiveSession) viewChunk(entryPath string, off uint64, size int) error {
+	info, err := s.c.Stat(entryPath)
+	if err != nil {
+		return err
+	}
+	if off > info.Size {
+		return fmt.Errorf("offset out of range")
+	}
+	r, err := s.c.OpenReader(entryPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if off > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(off)); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+	}
+	buf := make([]byte, size)
+	n, err := io.ReadFull(r, buf)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	buf = buf[:n]
+	fmt.Fprintf(s.out, "[%s] offset=%d shown=%d total=%d\n", entryPath, off, len(buf), info.Size)
+	if len(buf) == 0 {
+		fmt.Fprintln(s.out, "(eof)")
+	} else if utf8.Valid(buf) && bytes.IndexByte(buf, 0) < 0 {
+		fmt.Fprintln(s.out, string(buf))
+	} else {
+		fmt.Fprint(s.out, hex.Dump(buf))
+	}
+	s.lastViewPath = entryPath
+	s.lastViewOff = off
+	s.lastViewSize = size
+	s.lastViewShown = len(buf)
+	return nil
 }
 
 type zipProgressPrinter struct {
