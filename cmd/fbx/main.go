@@ -28,10 +28,16 @@ func main() {
 		os.Exit(runAdd(os.Args[2:]))
 	case "upsert":
 		os.Exit(runUpsert(os.Args[2:]))
+	case "replace":
+		os.Exit(runReplace(os.Args[2:]))
 	case "rm":
 		os.Exit(runRm(os.Args[2:]))
 	case "find":
 		os.Exit(runFind(os.Args[2:]))
+	case "stat":
+		os.Exit(runStat(os.Args[2:]))
+	case "set-meta":
+		os.Exit(runSetMeta(os.Args[2:]))
 	case "replace-text":
 		os.Exit(runReplaceText(os.Args[2:]))
 	case "list":
@@ -52,11 +58,14 @@ func usage() {
 
 Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
-  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--verify-in] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
+  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
-  fbx rm [--prefix p] [--glob g] <container.fbx> [entry ...]
+  fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
+  fbx rm [--prefix p] [--glob g] [--contains s] [--min-size n] [--max-size n] <container.fbx> [entry ...]
   fbx find [--prefix p] [--glob g] [--contains s] <container.fbx>
+  fbx stat [--json] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
+  fbx set-meta [--meta-json json|--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
   fbx replace-text --find old --replace new [--prefix p] [--glob g] [--dry-run] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx list <container.fbx>
   fbx extract [-o output] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
@@ -227,6 +236,7 @@ func runPack(args []string) int {
 	level := fs.Int("level", 0, "codec compression level")
 	chunkText := fs.Int("chunk-text", 0, "text chunk size in bytes")
 	chunkBin := fs.Int("chunk-bin", 0, "binary chunk size in bytes")
+	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
 	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
 	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
 	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
@@ -247,6 +257,7 @@ func runPack(args []string) int {
 		Level:        *level,
 		ChunkText:    *chunkText,
 		ChunkBin:     *chunkBin,
+		Workers:      *workers,
 		VerifyIn:     *verifyIn,
 		MaxEntrySize: *maxEntrySize,
 	}
@@ -279,6 +290,90 @@ func runAdd(args []string) int {
 
 func runUpsert(args []string) int {
 	return runAddLike(true, args)
+}
+
+func runReplace(args []string) int {
+	fs := flag.NewFlagSet("replace", flag.ContinueOnError)
+	as := fs.String("as", "", "entry path inside FBX")
+	metaJSON := fs.String("meta-json", "", "metadata JSON string")
+	metaFile := fs.String("meta-file", "", "metadata JSON file")
+	keepMeta := fs.Bool("keep-meta", true, "preserve existing metadata when --meta-* is not provided")
+	codecStr := fs.String("codec", "store", "chunk codec: store|zstd|lz4")
+	level := fs.Int("level", 0, "codec compression level")
+	chunkSize := fs.Int("chunk-size", 0, "chunk size in bytes")
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "replace requires <container.fbx> <source-file>")
+		return 2
+	}
+	containerPath := fs.Arg(0)
+	sourcePath := fs.Arg(1)
+
+	codec, err := parseCodec(*codecStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	meta, err := loadMeta(*metaJSON, *metaFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	src, err := os.Open(sourcePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer src.Close()
+	st, err := src.Stat()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	copts, err := buildLimitOptions(*maxEntrySize, *maxChunkSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	c, err := fbx.Open(containerPath, copts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer c.Close()
+
+	entryPath := *as
+	if entryPath == "" {
+		entryPath = filepath.Base(sourcePath)
+	}
+	entryPath = strings.ReplaceAll(entryPath, "\\", "/")
+	entryPath = strings.TrimLeft(entryPath, "/")
+
+	if len(meta) == 0 && *keepMeta {
+		info, err := c.Stat(entryPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		meta = info.Meta
+	}
+	wopts := &fbx.WriteOptions{
+		Codec:     codec,
+		Level:     *level,
+		ChunkSize: *chunkSize,
+		MTimeUnix: uint64(st.ModTime().Unix()),
+		Mode:      uint32(st.Mode().Perm()),
+	}
+	if err := c.Replace(entryPath, src, meta, wopts); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func runAddLike(isUpsert bool, args []string) int {
@@ -369,6 +464,9 @@ func runRm(args []string) int {
 	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
 	prefix := fs.String("prefix", "", "remove by prefix")
 	glob := fs.String("glob", "", "remove by glob pattern")
+	contains := fs.String("contains", "", "remove entries where path contains substring")
+	minSize := fs.Uint64("min-size", 0, "remove entries with size >= this value")
+	maxSize := fs.Uint64("max-size", 0, "remove entries with size <= this value")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -378,8 +476,8 @@ func runRm(args []string) int {
 	}
 	containerPath := fs.Arg(0)
 	paths := fs.Args()[1:]
-	if *prefix == "" && *glob == "" && len(paths) == 0 {
-		fmt.Fprintln(os.Stderr, "rm: specify paths and/or --prefix/--glob")
+	if *prefix == "" && *glob == "" && *contains == "" && *minSize == 0 && *maxSize == 0 && len(paths) == 0 {
+		fmt.Fprintln(os.Stderr, "rm: specify paths and/or filters (--prefix/--glob/--contains/--min-size/--max-size)")
 		return 2
 	}
 
@@ -416,6 +514,26 @@ func runRm(args []string) int {
 	}
 	if len(paths) > 0 {
 		n, err := tx.RemoveMany(paths)
+		if err != nil {
+			tx.Rollback()
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		removed += n
+	}
+	if *contains != "" || *minSize > 0 || *maxSize > 0 {
+		n, err := tx.RemoveWhere(func(e fbx.EntryInfo) bool {
+			if *contains != "" && !strings.Contains(e.Path, *contains) {
+				return false
+			}
+			if *minSize > 0 && e.Size < *minSize {
+				return false
+			}
+			if *maxSize > 0 && e.Size > *maxSize {
+				return false
+			}
+			return true
+		})
 		if err != nil {
 			tx.Rollback()
 			fmt.Fprintln(os.Stderr, err)
@@ -480,6 +598,125 @@ func runFind(args []string) int {
 		fmt.Println(e.Path)
 	}
 	if err := it.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func runStat(args []string) int {
+	fs := flag.NewFlagSet("stat", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "output as JSON")
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "stat requires <container.fbx> <entry-path>")
+		return 2
+	}
+
+	copts, err := buildLimitOptions(*maxEntrySize, *maxChunkSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	c, err := fbx.Open(fs.Arg(0), copts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer c.Close()
+
+	info, err := c.Stat(fs.Arg(1))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if *asJSON {
+		out := map[string]any{
+			"path":       info.Path,
+			"size":       info.Size,
+			"mtime_unix": info.MTimeUnix,
+			"mode":       info.Mode,
+			"flags":      info.Flags,
+			"meta_size":  len(info.Meta),
+		}
+		if json.Valid(info.Meta) {
+			out["meta"] = json.RawMessage(info.Meta)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("path=%s\nsize=%d\nmtime_unix=%d\nmode=%#o\nflags=%d\nmeta_size=%d\n", info.Path, info.Size, info.MTimeUnix, info.Mode, info.Flags, len(info.Meta))
+	return 0
+}
+
+func runSetMeta(args []string) int {
+	fs := flag.NewFlagSet("set-meta", flag.ContinueOnError)
+	metaJSON := fs.String("meta-json", "", "metadata JSON string")
+	metaFile := fs.String("meta-file", "", "metadata JSON file")
+	codecStr := fs.String("codec", "store", "chunk codec for rewritten entry: store|zstd|lz4")
+	level := fs.Int("level", 0, "codec compression level")
+	chunkSize := fs.Int("chunk-size", 0, "chunk size in bytes")
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "set-meta requires <container.fbx> <entry-path>")
+		return 2
+	}
+	meta, err := loadMeta(*metaJSON, *metaFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if len(meta) == 0 {
+		fmt.Fprintln(os.Stderr, "set-meta requires --meta-json or --meta-file")
+		return 2
+	}
+	codec, err := parseCodec(*codecStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	copts, err := buildLimitOptions(*maxEntrySize, *maxChunkSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	c, err := fbx.Open(fs.Arg(0), copts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer c.Close()
+
+	entryPath := fs.Arg(1)
+	info, err := c.Stat(entryPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	r, err := c.OpenReader(entryPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer r.Close()
+	wopts := &fbx.WriteOptions{
+		Codec:     codec,
+		Level:     *level,
+		ChunkSize: *chunkSize,
+		MTimeUnix: info.MTimeUnix,
+		Mode:      info.Mode,
+		Flags:     info.Flags,
+	}
+	if err := c.Upsert(entryPath, r, meta, wopts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
