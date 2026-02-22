@@ -1,4 +1,4 @@
-module go-fbx
+module github.com/pixfid/go-fbx
 
 go 1.23
 
