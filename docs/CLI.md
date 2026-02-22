@@ -9,6 +9,21 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 
 ## Commands
 
+### `interactive`
+Start REPL-like mode for browsing and editing a container.
+
+Example:
+```bash
+go run ./cmd/fbx interactive books.fbx
+```
+
+Inside interactive mode:
+- `open <file>`: open container.
+- `ls [path]`, `cd <path>`, `pwd`: navigate by virtual prefixes.
+- `cat <entry> [offset] [size]`, `next`, `prev`: view content in chunks.
+- `stat <entry>`: show entry parameters and metadata.
+- `rm <entry>`: delete entry.
+
 ### `convert-zip`
 Convert ZIP archive into a new FBX container.
 
