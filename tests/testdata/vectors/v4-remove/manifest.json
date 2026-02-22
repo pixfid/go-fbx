@@ -1,0 +1,11 @@
+{
+  "name": "v4-remove",
+  "description": "Entry removed from latest directory",
+  "expect_verify_all_error": false,
+  "entries": [
+    {
+      "path": "b.fb2",
+      "expected_file": "expected/b.fb2"
+    }
+  ]
+}

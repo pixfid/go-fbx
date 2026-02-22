@@ -1,0 +1,11 @@
+{
+  "name": "v1-min-store",
+  "description": "Minimal container with one STORE chunk",
+  "expect_verify_all_error": false,
+  "entries": [
+    {
+      "path": "book.fb2",
+      "expected_file": "expected/book.fb2"
+    }
+  ]
+}

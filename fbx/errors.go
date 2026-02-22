@@ -1,0 +1,13 @@
+package fbx
+
+import "errors"
+
+var (
+	ErrNotFound         = errors.New("fbx: entry not found")
+	ErrAlreadyExists    = errors.New("fbx: entry already exists")
+	ErrInvalidFormat    = errors.New("fbx: invalid format")
+	ErrCRCMismatch      = errors.New("fbx: crc mismatch")
+	ErrUnsupportedCodec = errors.New("fbx: unsupported codec")
+	ErrPathInvalid      = errors.New("fbx: invalid path")
+	ErrLimitExceeded    = errors.New("fbx: limit exceeded")
+)

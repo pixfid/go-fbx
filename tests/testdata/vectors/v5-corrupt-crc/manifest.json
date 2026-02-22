@@ -1,0 +1,11 @@
+{
+  "name": "v5-corrupt-crc",
+  "description": "Chunk payload is corrupted; extraction must fail with crc_mismatch",
+  "expect_verify_all_error": true,
+  "entries": [
+    {
+      "path": "book.fb2",
+      "expect_extract_err": "crc_mismatch"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "v3-replace",
+  "description": "Entry replaced; latest directory points to new content",
+  "expect_verify_all_error": false,
+  "entries": [
+    {
+      "path": "book.fb2",
+      "expected_file": "expected/book.fb2"
+    }
+  ]
+}
