@@ -4,7 +4,6 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 
 ## Command Index
 - `convert-zip` — import ZIP into FBX.
-- `interactive` — TUI browser/editor.
 - `pack` — rebuild container from live entries.
 - `pack-many` — parallel repack for multiple FBX files.
 - `add` / `upsert` / `replace` — write one file into container.
@@ -49,27 +48,6 @@ Flags:
 | `--overwrite` | `false` | Allow replacing existing output file. | Controlled overwrite in scripts. |
 | `--max-entry-size <bytes>` | `0` | Reject too-large entries while reading/writing. | Protect RAM/CPU on untrusted ZIP. |
 | `--max-chunk-size <bytes>` | `0` | Cap/read-check chunk sizes. | Prevent oversized chunk attacks. |
-
-## `interactive`
-Syntax:
-```bash
-fbx interactive [flags] [container.fbx]
-```
-
-Flags:
-
-| Flag | Default | What it does | Why use it |
-|---|---:|---|---|
-| `--max-entry-size <bytes>` | `0` | Safety limit for opened container. | Open unknown files more safely. |
-| `--max-chunk-size <bytes>` | `0` | Safety chunk bound for reads. | Bound decompression workload. |
-
-Keys:
-- `Tab` / `Shift+Tab` switch focus pane.
-- `↑/↓` move in file list (left pane), and scroll content in content pane.
-- `PgUp/PgDn` fast move/scroll.
-- `Backspace`/`Delete` delete selected entry (with confirmation).
-- `Enter` or `y` confirm deletion, `Esc` or `n` cancel.
-- `q`, `Esc`, `Ctrl+C` exit.
 
 ## `pack`
 Syntax:

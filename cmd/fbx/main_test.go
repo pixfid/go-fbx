@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pixfid/go-fbx/fbx"
 )
 
@@ -195,115 +193,6 @@ func TestRunRmWithWhereFilters(t *testing.T) {
 	}
 }
 
-func TestInteractiveSessionBasicFlow(t *testing.T) {
-	dir := t.TempDir()
-	containerPath := filepath.Join(dir, "c.fbx")
-	c, err := fbx.Create(containerPath, nil)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("0123456789")), []byte(`{"id":1}`), nil); err != nil {
-		t.Fatalf("add: %v", err)
-	}
-	if err := c.Add("books/b.fb2", bytes.NewReader([]byte("content-b")), nil, nil); err != nil {
-		t.Fatalf("add b: %v", err)
-	}
-	_ = c.Close()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	s := &interactiveSession{
-		opts:         nil,
-		out:          &out,
-		errOut:       &errOut,
-		lastViewSize: 4,
-	}
-	defer s.closeContainer()
-
-	if exit, code := s.runCommand("open " + containerPath); exit || code != 0 {
-		t.Fatalf("open failed: exit=%v code=%d stderr=%s", exit, code, errOut.String())
-	}
-	if _, code := s.runCommand("ls"); code != 0 {
-		t.Fatalf("ls failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "books/") {
-		t.Fatalf("expected books/ in ls output, got: %s", out.String())
-	}
-	out.Reset()
-	if _, code := s.runCommand("cd books"); code != 0 {
-		t.Fatalf("cd failed: %s", errOut.String())
-	}
-	if _, code := s.runCommand("pwd"); code != 0 {
-		t.Fatalf("pwd failed: %s", errOut.String())
-	}
-	if got := strings.TrimSpace(out.String()); got != "/books" {
-		t.Fatalf("unexpected pwd: %q", got)
-	}
-	out.Reset()
-	if _, code := s.runCommand("stat a.fb2"); code != 0 {
-		t.Fatalf("stat failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "path=books/a.fb2") {
-		t.Fatalf("unexpected stat output: %s", out.String())
-	}
-	out.Reset()
-	if _, code := s.runCommand("cat a.fb2 0 4"); code != 0 {
-		t.Fatalf("cat failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "0123") {
-		t.Fatalf("unexpected cat output: %s", out.String())
-	}
-	out.Reset()
-	if _, code := s.runCommand("next"); code != 0 {
-		t.Fatalf("next failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "4567") {
-		t.Fatalf("unexpected next output: %s", out.String())
-	}
-	out.Reset()
-	if _, code := s.runCommand("rm a.fb2"); code != 0 {
-		t.Fatalf("rm failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "removed books/a.fb2") {
-		t.Fatalf("unexpected rm output: %s", out.String())
-	}
-}
-
-func TestInteractiveSessionPrevAndErrors(t *testing.T) {
-	dir := t.TempDir()
-	containerPath := filepath.Join(dir, "c.fbx")
-	c, err := fbx.Create(containerPath, nil)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := c.Add("a.txt", bytes.NewReader([]byte("abcdefghij")), nil, nil); err != nil {
-		t.Fatalf("add: %v", err)
-	}
-	_ = c.Close()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	s := &interactiveSession{out: &out, errOut: &errOut, lastViewSize: 4}
-	defer s.closeContainer()
-
-	if _, code := s.runCommand("next"); code == 0 {
-		t.Fatalf("next should fail when nothing viewed")
-	}
-	if _, code := s.runCommand("open " + containerPath); code != 0 {
-		t.Fatalf("open failed: %s", errOut.String())
-	}
-	if _, code := s.runCommand("cat a.txt 4 4"); code != 0 {
-		t.Fatalf("cat failed: %s", errOut.String())
-	}
-	out.Reset()
-	if _, code := s.runCommand("prev"); code != 0 {
-		t.Fatalf("prev failed: %s", errOut.String())
-	}
-	if !strings.Contains(out.String(), "abcd") {
-		t.Fatalf("unexpected prev output: %s", out.String())
-	}
-}
-
 func TestRunInfoAndInspectCodecs(t *testing.T) {
 	dir := t.TempDir()
 	containerPath := filepath.Join(dir, "codecs.fbx")
@@ -446,83 +335,6 @@ func TestRunPackManySkipsIfAlreadyPacked(t *testing.T) {
 	}
 }
 
-func TestBrowserModelNavigationAndDelete(t *testing.T) {
-	dir := t.TempDir()
-	containerPath := filepath.Join(dir, "ui.fbx")
-	c, err := fbx.Create(containerPath, nil)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		name := fmt.Sprintf("books/%d.fb2", i)
-		if err := c.Add(name, bytes.NewReader([]byte("payload")), []byte(`{"i":1}`), nil); err != nil {
-			t.Fatalf("add %s: %v", name, err)
-		}
-	}
-	_ = c.Close()
-
-	s := &interactiveSession{opts: nil}
-	if err := s.openContainer(containerPath); err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.closeContainer()
-	m := newBrowserModel(s)
-	m.reload()
-	if len(m.entries) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(m.entries))
-	}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = updated.(browserModel)
-	if m.selected != 1 {
-		t.Fatalf("expected selected=1, got %d", m.selected)
-	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(browserModel)
-	if m.focusPane != 1 {
-		t.Fatalf("expected focusPane=1, got %d", m.focusPane)
-	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	m = updated.(browserModel)
-	if !m.confirmDelete {
-		t.Fatalf("delete confirm must be active")
-	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	m = updated.(browserModel)
-	if len(m.entries) != 2 {
-		t.Fatalf("expected one deleted entry, got %d", len(m.entries))
-	}
-}
-
-func TestBrowserModelRendersPseudoGraphics(t *testing.T) {
-	dir := t.TempDir()
-	containerPath := filepath.Join(dir, "ui2.fbx")
-	c, err := fbx.Create(containerPath, nil)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := c.Add("177692.fb2", bytes.NewReader([]byte("hello world")), []byte(`{"meta":"x"}`), nil); err != nil {
-		t.Fatalf("add: %v", err)
-	}
-	_ = c.Close()
-
-	s := &interactiveSession{}
-	if err := s.openContainer(containerPath); err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.closeContainer()
-	m := newBrowserModel(s)
-	m.width = 100
-	m.height = 24
-	m.reload()
-	v := m.View()
-	if !strings.Contains(v, "─") || !strings.Contains(v, "│") {
-		t.Fatalf("expected pseudographics in view:\n%s", v)
-	}
-	if !strings.Contains(v, "характеристики записи") {
-		t.Fatalf("expected record characteristics section:\n%s", v)
-	}
-}
-
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -557,18 +369,4 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatalf("read captured error output: %v", err)
 	}
 	return string(b)
-}
-
-func TestInteractiveModelAcceptsSpace(t *testing.T) {
-	m := newInteractiveModel(&interactiveSession{})
-	var model tea.Model = m
-	for _, r := range []rune("cat") {
-		model, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-	model, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
-	model, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-	got := model.(interactiveModel).input
-	if got != "cat 1" {
-		t.Fatalf("unexpected input: %q", got)
-	}
 }

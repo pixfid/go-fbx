@@ -13,8 +13,6 @@
 - Режимы проверки: только directory, выборка чанков, все чанки.
 - Массовые операции: удаление по prefix/glob/predicate и уплотнение `pack`.
 - CLI-команды `add/upsert/replace`, `set-meta`, `stat`, `find/rm/replace-text`.
-- CLI-режим `interactive` для просмотра/чтения/удаления записей.
-  - Bubble Tea UI с навигацией по панелям (`Tab`) и подтверждением удаления (`Backspace`).
 - Восстановление при повреждении primary header (fixed backup + journal/backup records).
 - Ограничения безопасности чтения/записи: `MaxEntrySize`, `MaxChunkSize`.
 
@@ -28,7 +26,6 @@ go run ./cmd/fbx convert-zip --progress \
   f.fb2-712242-720343.zip books.fbx
 
 go run ./cmd/fbx list books.fbx
-go run ./cmd/fbx interactive books.fbx
 go run ./cmd/fbx stat --json books.fbx books/123.fb2
 go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx

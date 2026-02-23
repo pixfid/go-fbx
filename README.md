@@ -13,8 +13,6 @@ It is designed for large FB2/FictionBook archives and supports streaming reads/w
 - Verification modes: directory-only, sampled chunks, all chunks.
 - Mass operations: remove by prefix/glob/predicate and `pack` compaction.
 - CLI includes `add/upsert/replace`, `set-meta`, `stat`, `find/rm/replace-text`.
-- CLI includes `interactive` mode for browsing/viewing/removing entries.
-  - Bubble Tea UI with pane navigation (`Tab`) and delete confirmation (`Backspace`).
 - Recovery path for broken primary header (fixed backup + journal/backup records).
 - Read/write safety limits: `MaxEntrySize`, `MaxChunkSize`.
 
@@ -28,7 +26,6 @@ go run ./cmd/fbx convert-zip --progress \
   f.fb2-712242-720343.zip books.fbx
 
 go run ./cmd/fbx list books.fbx
-go run ./cmd/fbx interactive books.fbx
 go run ./cmd/fbx stat --json books.fbx books/123.fb2
 go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx
