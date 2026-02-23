@@ -86,6 +86,18 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 		}
 	}
 
+	entries := make([]EntryInfo, 0, 1024)
+	it := src.List()
+	for it.Next() {
+		entries = append(entries, it.Value())
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	if opts.Progress != nil {
+		opts.Progress(PackProgress{Phase: "start", EntriesTotal: len(entries)})
+	}
+
 	outCfg := defaultOptions()
 	if opts.ChunkText > 0 {
 		outCfg.ChunkSizeText = opts.ChunkText
@@ -117,9 +129,15 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 		return err
 	}
 
-	it := src.List()
-	for it.Next() {
-		e := it.Value()
+	for i, e := range entries {
+		if opts.Progress != nil {
+			opts.Progress(PackProgress{
+				Phase:        "entry_start",
+				EntriesDone:  i,
+				EntriesTotal: len(entries),
+				EntryPath:    e.Path,
+			})
+		}
 		r, err := src.OpenReader(e.Path)
 		if err != nil {
 			tx.Rollback()
@@ -143,13 +161,24 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 			tx.Rollback()
 			return closeErr
 		}
-	}
-	if err := it.Err(); err != nil {
-		tx.Rollback()
-		return err
+		if opts.Progress != nil {
+			opts.Progress(PackProgress{
+				Phase:        "entry_done",
+				EntriesDone:  i + 1,
+				EntriesTotal: len(entries),
+				EntryPath:    e.Path,
+			})
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	if opts.Progress != nil {
+		opts.Progress(PackProgress{
+			Phase:        "done",
+			EntriesDone:  len(entries),
+			EntriesTotal: len(entries),
+		})
 	}
 	return nil
 }

@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"go-fbx/fbx"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pixfid/go-fbx/fbx"
 )
 
 func TestParseCodec(t *testing.T) {
@@ -297,5 +301,178 @@ func TestInteractiveSessionPrevAndErrors(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "abcd") {
 		t.Fatalf("unexpected prev output: %s", out.String())
+	}
+}
+
+func TestRunInfoAndInspectCodecs(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "codecs.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a.txt", bytes.NewReader([]byte("aaaa")), nil, &fbx.WriteOptions{Codec: fbx.CodecStore}); err != nil {
+		t.Fatalf("add store: %v", err)
+	}
+	if err := c.Add("b.txt", bytes.NewReader(bytes.Repeat([]byte("bbbb"), 64)), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		t.Fatalf("add zstd: %v", err)
+	}
+	_ = c.Close()
+
+	report, err := inspectContainerCodecs(containerPath)
+	if err != nil {
+		t.Fatalf("inspectContainerCodecs: %v", err)
+	}
+	if report.EntriesTotal != 2 {
+		t.Fatalf("expected 2 entries, got %d", report.EntriesTotal)
+	}
+	if report.ChunksTotal == 0 {
+		t.Fatalf("expected >0 chunks")
+	}
+	if !strings.Contains(report.Codec, "mixed") {
+		t.Fatalf("expected mixed codec summary, got %q", report.Codec)
+	}
+	if report.ChunkCounts["store"] == 0 || report.ChunkCounts["zstd"] == 0 {
+		t.Fatalf("expected both store and zstd counts, got %+v", report.ChunkCounts)
+	}
+	if !strings.Contains(report.Level, "mixed") {
+		t.Fatalf("expected mixed level summary, got %q", report.Level)
+	}
+	if report.LevelCounts["0"] == 0 || report.LevelCounts["3"] == 0 {
+		t.Fatalf("expected both level=0 and level=3 counts, got %+v", report.LevelCounts)
+	}
+
+	outText := captureStdout(t, func() {
+		if code := runInfo([]string{containerPath}); code != 0 {
+			t.Fatalf("runInfo exit code: %d", code)
+		}
+	})
+	if !strings.Contains(outText, "level=") {
+		t.Fatalf("plain output must contain level, got: %s", outText)
+	}
+
+	out := captureStdout(t, func() {
+		if code := runInfo([]string{"--json", containerPath}); code != 0 {
+			t.Fatalf("runInfo exit code: %d", code)
+		}
+	})
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(out), &obj); err != nil {
+		t.Fatalf("runInfo json output is invalid: %v; out=%s", err, out)
+	}
+	if obj["codec"] == "" {
+		t.Fatalf("json output must contain codec, got: %+v", obj)
+	}
+	if obj["level"] == "" {
+		t.Fatalf("json output must contain level, got: %+v", obj)
+	}
+}
+
+func TestBrowserModelNavigationAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "ui.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("books/%d.fb2", i)
+		if err := c.Add(name, bytes.NewReader([]byte("payload")), []byte(`{"i":1}`), nil); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+	}
+	_ = c.Close()
+
+	s := &interactiveSession{opts: nil}
+	if err := s.openContainer(containerPath); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.closeContainer()
+	m := newBrowserModel(s)
+	m.reload()
+	if len(m.entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(m.entries))
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(browserModel)
+	if m.selected != 1 {
+		t.Fatalf("expected selected=1, got %d", m.selected)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(browserModel)
+	if m.focusPane != 1 {
+		t.Fatalf("expected focusPane=1, got %d", m.focusPane)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(browserModel)
+	if !m.confirmDelete {
+		t.Fatalf("delete confirm must be active")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(browserModel)
+	if len(m.entries) != 2 {
+		t.Fatalf("expected one deleted entry, got %d", len(m.entries))
+	}
+}
+
+func TestBrowserModelRendersPseudoGraphics(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "ui2.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("177692.fb2", bytes.NewReader([]byte("hello world")), []byte(`{"meta":"x"}`), nil); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	s := &interactiveSession{}
+	if err := s.openContainer(containerPath); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.closeContainer()
+	m := newBrowserModel(s)
+	m.width = 100
+	m.height = 24
+	m.reload()
+	v := m.View()
+	if !strings.Contains(v, "─") || !strings.Contains(v, "│") {
+		t.Fatalf("expected pseudographics in view:\n%s", v)
+	}
+	if !strings.Contains(v, "характеристики записи") {
+		t.Fatalf("expected record characteristics section:\n%s", v)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	_ = w.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured output: %v", err)
+	}
+	return string(b)
+}
+
+func TestInteractiveModelAcceptsSpace(t *testing.T) {
+	m := newInteractiveModel(&interactiveSession{})
+	var model tea.Model = m
+	for _, r := range []rune("cat") {
+		model, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	model, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	got := model.(interactiveModel).input
+	if got != "cat 1" {
+		t.Fatalf("unexpected input: %q", got)
 	}
 }

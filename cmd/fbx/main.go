@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +17,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pixfid/go-fbx/fbx"
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 func main() {
@@ -47,6 +48,8 @@ func main() {
 		os.Exit(runStat(os.Args[2:]))
 	case "set-meta":
 		os.Exit(runSetMeta(os.Args[2:]))
+	case "info":
+		os.Exit(runInfo(os.Args[2:]))
 	case "replace-text":
 		os.Exit(runReplaceText(os.Args[2:]))
 	case "list":
@@ -68,13 +71,14 @@ func usage() {
 Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
   fbx interactive [--max-entry-size bytes] [--max-chunk-size bytes] [container.fbx]
-  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
+  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx rm [--prefix p] [--glob g] [--contains s] [--min-size n] [--max-size n] <container.fbx> [entry ...]
   fbx find [--prefix p] [--glob g] [--contains s] <container.fbx>
   fbx stat [--json] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
+  fbx info [--json] <container.fbx>
   fbx set-meta [--meta-json json|--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
   fbx replace-text --find old --replace new [--prefix p] [--glob g] [--dry-run] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx list <container.fbx>
@@ -179,45 +183,649 @@ func runInteractive(args []string) int {
 	}
 	s := &interactiveSession{
 		opts:         copts,
-		out:          os.Stdout,
-		errOut:       os.Stderr,
+		out:          io.Discard,
+		errOut:       io.Discard,
 		lastViewSize: 1024,
 	}
+	model := newBrowserModel(s)
 	if fs.NArg() == 1 {
 		if err := s.openContainer(fs.Arg(0)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 	}
-
-	fmt.Fprintln(os.Stderr, "interactive mode; type 'help' for commands")
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for {
-		fmt.Fprint(os.Stderr, s.prompt())
-		if !sc.Scan() {
-			fmt.Fprintln(os.Stderr)
-			break
-		}
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		exit, code := s.runCommand(line)
-		if code != 0 {
-			continue
-		}
-		if exit {
-			break
-		}
-	}
-	if err := sc.Err(); err != nil {
+	model.reload()
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	m, err := p.Run()
+	s.closeContainer()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		s.closeContainer()
 		return 1
 	}
-	s.closeContainer()
+	if bm, ok := m.(browserModel); ok {
+		if bm.exitCode != 0 {
+			return bm.exitCode
+		}
+	}
 	return 0
+}
+
+type browserModel struct {
+	s             *interactiveSession
+	width         int
+	height        int
+	focusPane     int // 0=list,1=meta,2=content
+	entries       []fbx.EntryInfo
+	selected      int
+	listOffset    int
+	contentOffset uint64
+	contentLines  []string
+	codecByPath   map[string]string
+	status        string
+	confirmDelete bool
+	exitCode      int
+}
+
+func newBrowserModel(s *interactiveSession) browserModel {
+	return browserModel{
+		s:           s,
+		width:       120,
+		height:      36,
+		focusPane:   0,
+		codecByPath: map[string]string{},
+		status:      "↑/↓ список, Tab смена окна, Backspace удалить, q выход",
+	}
+}
+
+func (m browserModel) Init() tea.Cmd { return nil }
+
+func (m browserModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case tea.KeyMsg:
+		if m.confirmDelete {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.confirmDelete = false
+				m.status = "Удаление отменено"
+			case tea.KeyEnter:
+				m.confirmDelete = false
+				m.deleteSelected()
+			case tea.KeyRunes:
+				r := strings.ToLower(msg.String())
+				if r == "y" || r == "д" {
+					m.confirmDelete = false
+					m.deleteSelected()
+				} else if r == "n" || r == "т" {
+					m.confirmDelete = false
+					m.status = "Удаление отменено"
+				}
+			}
+			return m, nil
+		}
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			m.exitCode = 130
+			return m, tea.Quit
+		case tea.KeyEsc:
+			return m, tea.Quit
+		case tea.KeyRunes:
+			switch strings.ToLower(msg.String()) {
+			case "q":
+				return m, tea.Quit
+			}
+		case tea.KeyTab:
+			m.focusPane = (m.focusPane + 1) % 3
+		case tea.KeyShiftTab:
+			m.focusPane = (m.focusPane + 2) % 3
+		case tea.KeyUp:
+			if m.focusPane == 0 {
+				m.moveSelection(-1)
+			} else if m.focusPane == 2 {
+				m.scrollContent(-512)
+			}
+		case tea.KeyDown:
+			if m.focusPane == 0 {
+				m.moveSelection(1)
+			} else if m.focusPane == 2 {
+				m.scrollContent(512)
+			}
+		case tea.KeyPgUp:
+			if m.focusPane == 0 {
+				m.moveSelection(-10)
+			} else if m.focusPane == 2 {
+				m.scrollContent(-2048)
+			}
+		case tea.KeyPgDown:
+			if m.focusPane == 0 {
+				m.moveSelection(10)
+			} else if m.focusPane == 2 {
+				m.scrollContent(2048)
+			}
+		case tea.KeyBackspace, tea.KeyDelete:
+			if len(m.entries) == 0 {
+				m.status = "Нет записей для удаления"
+				return m, nil
+			}
+			m.confirmDelete = true
+			e := m.entries[m.selected]
+			m.status = fmt.Sprintf("Удалить %s ? Enter/y - да, Esc/n - нет", e.Path)
+		}
+	}
+	return m, nil
+}
+
+func (m browserModel) View() string {
+	if m.width < 60 {
+		return "Слишком узкий терминал для интерактивного режима.\nРасширьте окно.\n"
+	}
+	w := m.width
+	h := m.height
+	if h < 18 {
+		h = 18
+	}
+
+	file := "(no file)"
+	if m.s != nil && m.s.containerPath != "" {
+		file = filepath.Base(m.s.containerPath)
+	}
+	header := "---" + file + strings.Repeat("-", max(3, w-3-len(file)))
+
+	bodyH := h - 4
+	if bodyH < 12 {
+		bodyH = 12
+	}
+	leftW := w / 3
+	if leftW < 22 {
+		leftW = 22
+	}
+	if leftW > w-30 {
+		leftW = w - 30
+	}
+	rightW := w - 3 - leftW
+	metaH := bodyH / 3
+	if metaH < 5 {
+		metaH = 5
+	}
+	contentH := bodyH - metaH - 1
+
+	listLines := m.renderList(leftW, bodyH)
+	metaLines := m.renderMeta(rightW, metaH)
+	contentLines := m.renderContent(rightW, contentH)
+
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteByte('\n')
+	for row := 0; row < bodyH; row++ {
+		var right string
+		if row < metaH {
+			right = metaLines[row]
+		} else if row == metaH {
+			right = strings.Repeat("─", rightW)
+		} else {
+			right = contentLines[row-metaH-1]
+		}
+		b.WriteString("│")
+		b.WriteString(listLines[row])
+		b.WriteString("│")
+		b.WriteString(right)
+		b.WriteString("│\n")
+	}
+
+	b.WriteString(strings.Repeat("-", w))
+	b.WriteByte('\n')
+	infoLines := m.renderDetails(w)
+	for _, ln := range infoLines {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	b.WriteString(strings.Repeat("-", w))
+	return b.String()
+}
+
+func (m *browserModel) reload() {
+	if m.s == nil || m.s.c == nil {
+		m.entries = nil
+		m.contentLines = []string{"container not open"}
+		m.codecByPath = map[string]string{}
+		if m.s == nil || m.s.containerPath == "" {
+			m.status = "Откройте контейнер: fbx interactive <file.fbx>"
+		}
+		return
+	}
+	it := m.s.c.List()
+	entries := make([]fbx.EntryInfo, 0, 1024)
+	for it.Next() {
+		entries = append(entries, it.Value())
+	}
+	m.entries = entries
+	if m.selected >= len(m.entries) {
+		m.selected = max(0, len(m.entries)-1)
+	}
+	if m.selected < 0 {
+		m.selected = 0
+	}
+	if cMap, err := inspectEntryCodecs(m.s.containerPath); err == nil {
+		m.codecByPath = cMap
+	} else {
+		m.codecByPath = map[string]string{}
+		m.status = "Не удалось прочитать кодеки: " + err.Error()
+	}
+	m.contentOffset = 0
+	m.loadContent()
+}
+
+func (m *browserModel) moveSelection(delta int) {
+	if len(m.entries) == 0 {
+		return
+	}
+	n := m.selected + delta
+	if n < 0 {
+		n = 0
+	}
+	if n >= len(m.entries) {
+		n = len(m.entries) - 1
+	}
+	if n != m.selected {
+		m.selected = n
+		m.contentOffset = 0
+		m.loadContent()
+	}
+}
+
+func (m *browserModel) scrollContent(delta int64) {
+	if len(m.entries) == 0 {
+		return
+	}
+	info := m.entries[m.selected]
+	var off int64 = int64(m.contentOffset) + delta
+	if off < 0 {
+		off = 0
+	}
+	if uint64(off) > info.Size {
+		off = int64(info.Size)
+	}
+	m.contentOffset = uint64(off)
+	m.loadContent()
+}
+
+func (m *browserModel) loadContent() {
+	if len(m.entries) == 0 || m.s == nil || m.s.c == nil {
+		m.contentLines = []string{"(empty)"}
+		return
+	}
+	e := m.entries[m.selected]
+	data, total, err := readEntryWindow(m.s.c, e.Path, m.contentOffset, 8192)
+	if err != nil {
+		m.contentLines = []string{"error: " + err.Error()}
+		return
+	}
+	lines := make([]string, 0, 32)
+	lines = append(lines, fmt.Sprintf("offset %d / %d", m.contentOffset, total))
+	if len(data) == 0 {
+		lines = append(lines, "(eof)")
+		m.contentLines = lines
+		return
+	}
+	if utf8.Valid(data) && bytes.IndexByte(data, 0) < 0 {
+		lines = append(lines, splitOutputLines(string(data))...)
+	} else {
+		lines = append(lines, splitOutputLines(hex.Dump(data))...)
+	}
+	m.contentLines = lines
+}
+
+func (m *browserModel) deleteSelected() {
+	if len(m.entries) == 0 || m.s == nil || m.s.c == nil {
+		m.status = "Нет записи для удаления"
+		return
+	}
+	p := m.entries[m.selected].Path
+	if err := m.s.c.Remove(p); err != nil {
+		m.status = "Ошибка удаления: " + err.Error()
+		return
+	}
+	m.status = "Удалено: " + p
+	m.reload()
+}
+
+func (m *browserModel) renderList(w, h int) []string {
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = clipPad("", w)
+	}
+	title := " entries "
+	if m.focusPane == 0 {
+		title = "▶ entries "
+	}
+	lines[0] = clipPad(title, w)
+	visible := h - 1
+	if visible < 1 {
+		return lines
+	}
+	if len(m.entries) == 0 {
+		lines[1] = clipPad("(empty)", w)
+		return lines
+	}
+	if m.selected < m.listOffset {
+		m.listOffset = m.selected
+	}
+	if m.selected >= m.listOffset+visible {
+		m.listOffset = m.selected - visible + 1
+	}
+	if m.listOffset < 0 {
+		m.listOffset = 0
+	}
+	for i := 0; i < visible; i++ {
+		idx := m.listOffset + i
+		if idx >= len(m.entries) {
+			break
+		}
+		p := path.Base(m.entries[idx].Path)
+		prefix := "  "
+		if idx == m.selected {
+			prefix = "> "
+		}
+		lines[i+1] = clipPad(prefix+p, w)
+	}
+	return lines
+}
+
+func (m *browserModel) renderMeta(w, h int) []string {
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = clipPad("", w)
+	}
+	title := " meta "
+	if m.focusPane == 1 {
+		title = "▶ meta "
+	}
+	lines[0] = clipPad(title, w)
+	if len(m.entries) == 0 {
+		lines[1] = clipPad("(empty)", w)
+		return lines
+	}
+	e := m.entries[m.selected]
+	codec := m.codecByPath[e.Path]
+	if codec == "" {
+		codec = "unknown"
+	}
+	metaLabel := "meta: (empty)"
+	if len(e.Meta) > 0 {
+		if json.Valid(e.Meta) {
+			metaLabel = "meta_json:"
+		} else if utf8.Valid(e.Meta) {
+			metaLabel = "meta_text:"
+		} else {
+			metaLabel = "meta_hex:"
+		}
+	}
+	base := []string{
+		"> " + path.Base(e.Path),
+		"codec: " + codec,
+		metaLabel,
+	}
+	if len(e.Meta) > 0 {
+		if json.Valid(e.Meta) {
+			var out bytes.Buffer
+			if err := json.Indent(&out, e.Meta, "", "  "); err == nil {
+				base = append(base, splitOutputLines(out.String())...)
+			} else {
+				base = append(base, string(e.Meta))
+			}
+		} else if utf8.Valid(e.Meta) {
+			base = append(base, splitOutputLines(string(e.Meta))...)
+		} else {
+			base = append(base, splitOutputLines(hex.Dump(e.Meta))...)
+		}
+	}
+	for i := 1; i < h && i-1 < len(base); i++ {
+		lines[i] = clipPad(base[i-1], w)
+	}
+	return lines
+}
+
+func (m *browserModel) renderContent(w, h int) []string {
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = clipPad("", w)
+	}
+	title := " content "
+	if m.focusPane == 2 {
+		title = "▶ content "
+	}
+	lines[0] = clipPad(title, w)
+	for i := 1; i < h && i-1 < len(m.contentLines); i++ {
+		lines[i] = clipPad(m.contentLines[i-1], w)
+	}
+	return lines
+}
+
+func (m *browserModel) renderDetails(w int) []string {
+	out := make([]string, 4)
+	out[0] = clipPad("|                                           |", w)
+	out[1] = clipPad("|             характеристики записи         |", w)
+	if len(m.entries) == 0 {
+		out[2] = clipPad("|                контейнер пуст             |", w)
+		out[3] = clipPad("| "+m.status, w)
+		return out
+	}
+	e := m.entries[m.selected]
+	codec := m.codecByPath[e.Path]
+	out[2] = clipPad(fmt.Sprintf("| path=%s size=%d codec=%s mode=%#o flags=%d mtime=%d meta=%dB", e.Path, e.Size, codec, e.Mode, e.Flags, e.MTimeUnix, len(e.Meta)), w)
+	out[3] = clipPad("| "+m.status, w)
+	return out
+}
+
+func readEntryWindow(c *fbx.Container, entryPath string, off uint64, maxN int) ([]byte, uint64, error) {
+	info, err := c.Stat(entryPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	if off > info.Size {
+		return nil, info.Size, fmt.Errorf("offset out of range")
+	}
+	r, err := c.OpenReader(entryPath)
+	if err != nil {
+		return nil, info.Size, err
+	}
+	defer r.Close()
+	if off > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(off)); err != nil && !errors.Is(err, io.EOF) {
+			return nil, info.Size, err
+		}
+	}
+	buf := make([]byte, maxN)
+	n, err := io.ReadFull(r, buf)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		err = nil
+	}
+	if err != nil {
+		return nil, info.Size, err
+	}
+	return buf[:n], info.Size, nil
+}
+
+func clipPad(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) > width {
+		if width >= 2 {
+			r = append(r[:width-1], '…')
+		} else {
+			r = r[:width]
+		}
+	}
+	if len(r) < width {
+		r = append(r, []rune(strings.Repeat(" ", width-len(r)))...)
+	}
+	return string(r)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type interactiveModel struct {
+	s        *interactiveSession
+	lines    []string
+	input    string
+	history  []string
+	histPos  int
+	width    int
+	height   int
+	exitCode int
+}
+
+func newInteractiveModel(s *interactiveSession) interactiveModel {
+	return interactiveModel{
+		s:       s,
+		lines:   make([]string, 0, 256),
+		history: make([]string, 0, 128),
+		histPos: -1,
+		height:  24,
+	}
+}
+
+func (m interactiveModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m interactiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			m.exitCode = 130
+			return m, tea.Quit
+		case tea.KeyEsc:
+			return m, tea.Quit
+		case tea.KeyEnter:
+			cmd := strings.TrimSpace(m.input)
+			m.input = ""
+			if cmd == "" {
+				return m, nil
+			}
+			m.history = append(m.history, cmd)
+			m.histPos = -1
+			m.appendLine(m.s.prompt() + cmd)
+			exit, code, outLines, errLines := m.execCommand(cmd)
+			for _, ln := range outLines {
+				m.appendLine(ln)
+			}
+			for _, ln := range errLines {
+				m.appendLine("error: " + ln)
+			}
+			if code != 0 && len(errLines) == 0 {
+				m.appendLine(fmt.Sprintf("error: command failed (%d)", code))
+			}
+			if exit {
+				m.exitCode = 0
+				return m, tea.Quit
+			}
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			if len(m.input) > 0 {
+				m.input = m.input[:len(m.input)-1]
+			}
+		case tea.KeySpace:
+			m.input += " "
+		case tea.KeyCtrlU:
+			m.input = ""
+		case tea.KeyUp:
+			if len(m.history) == 0 {
+				return m, nil
+			}
+			if m.histPos == -1 {
+				m.histPos = len(m.history) - 1
+			} else if m.histPos > 0 {
+				m.histPos--
+			}
+			m.input = m.history[m.histPos]
+		case tea.KeyDown:
+			if len(m.history) == 0 || m.histPos == -1 {
+				return m, nil
+			}
+			if m.histPos < len(m.history)-1 {
+				m.histPos++
+				m.input = m.history[m.histPos]
+			} else {
+				m.histPos = -1
+				m.input = ""
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.input += msg.String()
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m interactiveModel) View() string {
+	maxLines := m.height - 2
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	start := 0
+	if len(m.lines) > maxLines {
+		start = len(m.lines) - maxLines
+	}
+	var b strings.Builder
+	for _, ln := range m.lines[start:] {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	b.WriteString(m.s.prompt())
+	b.WriteString(m.input)
+	return b.String()
+}
+
+func (m *interactiveModel) appendLine(line string) {
+	for _, ln := range splitOutputLines(line) {
+		m.lines = append(m.lines, ln)
+	}
+	if len(m.lines) > 2000 {
+		m.lines = m.lines[len(m.lines)-2000:]
+	}
+}
+
+func (m *interactiveModel) execCommand(command string) (bool, int, []string, []string) {
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+	prevOut, prevErr := m.s.out, m.s.errOut
+	m.s.out = &outBuf
+	m.s.errOut = &errBuf
+	exit, code := m.s.runCommand(command)
+	m.s.out = prevOut
+	m.s.errOut = prevErr
+	return exit, code, splitOutputLines(outBuf.String()), splitOutputLines(errBuf.String())
+}
+
+func splitOutputLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	raw := strings.Split(s, "\n")
+	out := make([]string, 0, len(raw))
+	for _, ln := range raw {
+		if ln == "" {
+			continue
+		}
+		out = append(out, ln)
+	}
+	return out
 }
 
 func (s *interactiveSession) prompt() string {
@@ -661,6 +1269,19 @@ func (p *zipProgressPrinter) Handle(ev fbx.ZIPImportProgress) {
 	}
 }
 
+func (p *zipProgressPrinter) HandlePack(ev fbx.PackProgress) {
+	switch ev.Phase {
+	case "start":
+		p.render(0, ev.EntriesTotal, false)
+	case "entry_start":
+		p.render(ev.EntriesDone+1, ev.EntriesTotal, false)
+	case "entry_done":
+		p.render(ev.EntriesDone, ev.EntriesTotal, false)
+	case "done":
+		p.render(ev.EntriesDone, ev.EntriesTotal, true)
+	}
+}
+
 func (p *zipProgressPrinter) render(done, total int, finish bool) {
 	if total <= 0 {
 		total = 1
@@ -727,6 +1348,231 @@ func runList(args []string) int {
 	return 0
 }
 
+type codecReport struct {
+	EntriesTotal int            `json:"entries_total"`
+	ChunksTotal  int            `json:"chunks_total"`
+	ChunkCounts  map[string]int `json:"chunk_counts"`
+	Codec        string         `json:"codec"`
+	Level        string         `json:"level"`
+	LevelCounts  map[string]int `json:"level_counts"`
+}
+
+func runInfo(args []string) int {
+	fs := flag.NewFlagSet("info", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "output as JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "info requires <container.fbx>")
+		return 2
+	}
+	report, err := inspectContainerCodecs(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("entries_total=%d\n", report.EntriesTotal)
+	fmt.Printf("chunks_total=%d\n", report.ChunksTotal)
+	fmt.Printf("codec=%s\n", report.Codec)
+	fmt.Printf("level=%s\n", report.Level)
+	keys := make([]string, 0, len(report.ChunkCounts))
+	for k := range report.ChunkCounts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("chunks_%s=%d\n", k, report.ChunkCounts[k])
+	}
+	for _, k := range sortedLevelCountKeys(report.LevelCounts) {
+		fmt.Printf("chunks_level_%s=%d\n", k, report.LevelCounts[k])
+	}
+	return 0
+}
+
+func sortedLevelCountKeys(m map[string]int) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	intKeys := make([]int, 0, len(m))
+	for k := range m {
+		v, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		intKeys = append(intKeys, v)
+	}
+	sort.Ints(intKeys)
+	out := make([]string, 0, len(intKeys))
+	for _, k := range intKeys {
+		out = append(out, strconv.Itoa(k))
+	}
+	return out
+}
+
+func inspectContainerCodecs(containerPath string) (codecReport, error) {
+	f, err := os.Open(containerPath)
+	if err != nil {
+		return codecReport{}, err
+	}
+	defer f.Close()
+
+	headBuf := make([]byte, format.HeaderSize)
+	if _, err := f.ReadAt(headBuf, 0); err != nil {
+		return codecReport{}, err
+	}
+	h, err := format.UnmarshalHeaderV1(headBuf)
+	if err != nil {
+		return codecReport{}, err
+	}
+	dirBlob := make([]byte, h.DirSize)
+	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+		return codecReport{}, err
+	}
+	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	if err != nil {
+		return codecReport{}, err
+	}
+
+	counts := map[string]int{
+		"store": 0,
+		"zstd":  0,
+		"lz4":   0,
+	}
+	levelCounts := map[string]int{}
+	totalChunks := 0
+	for _, e := range dir.Entries {
+		for _, ref := range e.Chunks {
+			codec, level, err := readChunkHeaderAt(f, int64(ref.ChunkOffset))
+			if err != nil {
+				return codecReport{}, err
+			}
+			switch codec {
+			case format.CodecStore:
+				counts["store"]++
+			case format.CodecZstd:
+				counts["zstd"]++
+			case format.CodecLZ4:
+				counts["lz4"]++
+			default:
+				counts[fmt.Sprintf("unknown_%d", codec)]++
+			}
+			levelCounts[strconv.Itoa(int(level))]++
+			totalChunks++
+		}
+	}
+	used := make([]string, 0, len(counts))
+	for name, n := range counts {
+		if n > 0 {
+			used = append(used, name)
+		}
+	}
+	sort.Strings(used)
+	codecSummary := "none"
+	if len(used) == 1 {
+		codecSummary = used[0]
+	} else if len(used) > 1 {
+		codecSummary = "mixed(" + strings.Join(used, ",") + ")"
+	}
+	usedLevels := sortedLevelCountKeys(levelCounts)
+	levelSummary := "none"
+	if len(usedLevels) == 1 {
+		levelSummary = usedLevels[0]
+	} else if len(usedLevels) > 1 {
+		levelSummary = "mixed(" + strings.Join(usedLevels, ",") + ")"
+	}
+	return codecReport{
+		EntriesTotal: len(dir.Entries),
+		ChunksTotal:  totalChunks,
+		ChunkCounts:  counts,
+		Codec:        codecSummary,
+		Level:        levelSummary,
+		LevelCounts:  levelCounts,
+	}, nil
+}
+
+func inspectEntryCodecs(containerPath string) (map[string]string, error) {
+	f, err := os.Open(containerPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	headBuf := make([]byte, format.HeaderSize)
+	if _, err := f.ReadAt(headBuf, 0); err != nil {
+		return nil, err
+	}
+	h, err := format.UnmarshalHeaderV1(headBuf)
+	if err != nil {
+		return nil, err
+	}
+	dirBlob := make([]byte, h.DirSize)
+	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+		return nil, err
+	}
+	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, len(dir.Entries))
+	for _, e := range dir.Entries {
+		counts := map[string]int{"store": 0, "zstd": 0, "lz4": 0}
+		for _, ref := range e.Chunks {
+			codec, err := readChunkCodecAt(f, int64(ref.ChunkOffset))
+			if err != nil {
+				return nil, err
+			}
+			switch codec {
+			case format.CodecStore:
+				counts["store"]++
+			case format.CodecZstd:
+				counts["zstd"]++
+			case format.CodecLZ4:
+				counts["lz4"]++
+			default:
+				counts[fmt.Sprintf("unknown_%d", codec)]++
+			}
+		}
+		used := make([]string, 0, len(counts))
+		for k, n := range counts {
+			if n > 0 {
+				used = append(used, k)
+			}
+		}
+		sort.Strings(used)
+		summary := "none"
+		if len(used) == 1 {
+			summary = used[0]
+		} else if len(used) > 1 {
+			summary = "mixed(" + strings.Join(used, ",") + ")"
+		}
+		out[e.Path] = summary
+	}
+	return out, nil
+}
+
+func readChunkCodecAt(r io.ReaderAt, off int64) (format.Codec, error) {
+	codec, _, err := readChunkHeaderAt(r, off)
+	return codec, err
+}
+
+func readChunkHeaderAt(r io.ReaderAt, off int64) (format.Codec, uint8, error) {
+	var head [4]byte
+	if _, err := r.ReadAt(head[:], off); err != nil {
+		return 0, 0, err
+	}
+	if head[0] != format.MagicChunk[0] || head[1] != format.MagicChunk[1] {
+		return 0, 0, fbx.ErrInvalidFormat
+	}
+	return format.Codec(head[2]), head[3], nil
+}
+
 func runPack(args []string) int {
 	fs := flag.NewFlagSet("pack", flag.ContinueOnError)
 	out := fs.String("o", "", "output file (default: in-place rewrite)")
@@ -736,6 +1582,7 @@ func runPack(args []string) int {
 	chunkBin := fs.Int("chunk-bin", 0, "binary chunk size in bytes")
 	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
 	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
+	showProgress := fs.Bool("progress", true, "show pack progress")
 	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
 	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
 	if err := fs.Parse(args); err != nil {
@@ -758,6 +1605,10 @@ func runPack(args []string) int {
 		Workers:      *workers,
 		VerifyIn:     *verifyIn,
 		MaxEntrySize: *maxEntrySize,
+	}
+	if *showProgress {
+		p := &zipProgressPrinter{}
+		popts.Progress = p.HandlePack
 	}
 	if *maxChunkSize > uint64(^uint32(0)) {
 		fmt.Fprintf(os.Stderr, "--max-chunk-size must be <= %d\n", uint64(^uint32(0)))

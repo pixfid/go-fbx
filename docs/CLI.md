@@ -2,91 +2,288 @@
 
 Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 
-## Global Notes
-- Paths inside container are normalized to `/` separators.
-- `--max-entry-size` and `--max-chunk-size` are byte limits (`0` = unlimited).
-- Progress for ZIP conversion is redrawn in one line: `[done/total] ▓▓▓...`.
+## Command Index
+- `convert-zip` — import ZIP into FBX.
+- `interactive` — TUI browser/editor.
+- `pack` — rebuild container from live entries.
+- `add` / `upsert` / `replace` — write one file into container.
+- `rm` / `find` — filter/remove by path and size predicates.
+- `stat` / `info` / `list` — inspect container and entries.
+- `set-meta` — rewrite one entry with new metadata.
+- `replace-text` — bulk byte-string replacement in matching entries.
+- `extract` — stream one entry out.
+- `verify` — integrity validation.
 
-## Commands
+## Global Semantics
+- Exit codes:
+  - `0` success
+  - `1` runtime/data error
+  - `2` CLI usage/argument error
+- Paths inside container are normalized to `/` and must be valid FBX paths.
+- Size flags are bytes.
+- `--max-entry-size` and `--max-chunk-size` are safety bounds (`0` = unlimited).
+- `--codec` values: `store|zstd|lz4`.
+- `--level` default is `0`:
+  - for `zstd`, `0` maps to fast mode (not zstd default level 3)
+  - for `store`, ignored
+  - for `lz4`, currently not used by codec implementation
+- Progress bar redraw is one line: `[done/total] ▓▓▓...`.
 
-### `interactive`
-Start REPL-like mode for browsing and editing a container.
-
-Example:
+## `convert-zip`
+Syntax:
 ```bash
-go run ./cmd/fbx interactive books.fbx
+fbx convert-zip [flags] <input.zip> <output.fbx>
 ```
 
-Inside interactive mode:
-- `open <file>`: open container.
-- `ls [path]`, `cd <path>`, `pwd`: navigate by virtual prefixes.
-- `cat <entry> [offset] [size]`, `next`, `prev`: view content in chunks.
-- `stat <entry>`: show entry parameters and metadata.
-- `rm <entry>`: delete entry.
+Flags:
 
-### `convert-zip`
-Convert ZIP archive into a new FBX container.
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--meta auto\|none` | `auto` | `auto` writes generated metadata per ZIP entry; `none` disables auto metadata. | Disable metadata for minimal containers, or keep it for traceability. |
+| `--meta-file <file.json>` | `""` | JSON map `path -> metadata object`; merged over auto metadata. | Inject custom metadata (IDs, titles, source tags). |
+| `--prefix <p>` | `""` | Prepends path prefix inside FBX. | Place imported files under `books/`, `images/`, etc. |
+| `--codec store\|zstd\|lz4` | `store` | Codec for newly written chunks. | Trade compression ratio vs speed. |
+| `--level <n>` | `0` | Compression level passed to writer. | Tune zstd compression. |
+| `--progress` | `true` | Show one-line progress bar. | Observe long imports. |
+| `--overwrite` | `false` | Allow replacing existing output file. | Controlled overwrite in scripts. |
+| `--max-entry-size <bytes>` | `0` | Reject too-large entries while reading/writing. | Protect RAM/CPU on untrusted ZIP. |
+| `--max-chunk-size <bytes>` | `0` | Cap/read-check chunk sizes. | Prevent oversized chunk attacks. |
 
-Example:
+## `interactive`
+Syntax:
 ```bash
-go run ./cmd/fbx convert-zip --meta auto --codec zstd --progress input.zip out.fbx
+fbx interactive [flags] [container.fbx]
 ```
 
-Key flags: `--meta auto|none`, `--meta-file`, `--prefix`, `--codec`, `--level`, `--overwrite`, `--max-entry-size`, `--max-chunk-size`.
+Flags:
 
-### `pack`
-Rebuild container with only live entries (in-place by default).
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--max-entry-size <bytes>` | `0` | Safety limit for opened container. | Open unknown files more safely. |
+| `--max-chunk-size <bytes>` | `0` | Safety chunk bound for reads. | Bound decompression workload. |
 
-Example:
+Keys:
+- `Tab` / `Shift+Tab` switch focus pane.
+- `↑/↓` move in file list (left pane), and scroll content in content pane.
+- `PgUp/PgDn` fast move/scroll.
+- `Backspace`/`Delete` delete selected entry (with confirmation).
+- `Enter` or `y` confirm deletion, `Esc` or `n` cancel.
+- `q`, `Esc`, `Ctrl+C` exit.
+
+## `pack`
+Syntax:
 ```bash
-go run ./cmd/fbx pack --codec zstd --chunk-text 262144 --verify-in books.fbx
+fbx pack [flags] <input.fbx>
 ```
 
-Key flags: `-o`, `--codec`, `--level`, `--chunk-text`, `--chunk-bin`, `--workers`, `--verify-in`, `--max-entry-size`, `--max-chunk-size`.
+Flags:
 
-### `add` / `upsert` / `replace`
-Write file content into an entry.
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `-o <output.fbx>` | in-place | Output path. If omitted, rewrites input in place via temp+rename. | Keep original as source or compact in place. |
+| `--codec store\|zstd\|lz4` | `store` | Rewrites all live entries with selected codec. | Change container-wide codec policy. |
+| `--level <n>` | `0` | Compression level for rewritten chunks. | Control zstd speed/ratio tradeoff. |
+| `--chunk-text <bytes>` | `0` | Text chunk size override during repack. | Optimize text extraction throughput. |
+| `--chunk-bin <bytes>` | `0` | Binary chunk size override during repack. | Optimize binary chunking layout. |
+| `--workers <n>` | `0` | Parallel compression workers (`0` = library default). | Speed up heavy recompression. |
+| `--verify-in` | `true` | Verify input container before repack. | Catch corruption early. |
+| `--progress` | `true` | One-line repack progress bar. | Visibility for long repacks. |
+| `--max-entry-size <bytes>` | `0` | Safety limit during read/write. | Harden repack for untrusted files. |
+| `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
 
-Example:
+## `add`, `upsert`, `replace`
+Syntax:
 ```bash
-go run ./cmd/fbx add --as books/1.fb2 --codec lz4 books.fbx ./1.fb2
-go run ./cmd/fbx replace --as books/1.fb2 --keep-meta books.fbx ./1.fb2
+fbx add [flags] <container.fbx> <source-file>
+fbx upsert [flags] <container.fbx> <source-file>
+fbx replace [flags] <container.fbx> <source-file>
 ```
 
-Key flags: `--as`, `--meta-json`, `--meta-file`, `--codec`, `--level`, `--chunk-size`, `--max-entry-size`, `--max-chunk-size`.
-`replace` uses strict semantics: entry must already exist.
+Semantics:
+- `add`: fail if entry exists.
+- `upsert`: add or replace.
+- `replace`: fail if entry does not exist.
 
-### `set-meta`
-Update metadata of an existing entry while keeping content (entry is rewritten internally).
+Shared flags (`add`/`upsert`/`replace`):
 
-Example:
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--as <entry/path>` | source basename | Entry path inside FBX. | Place file exactly where needed. |
+| `--meta-json <json>` | empty | Inline metadata JSON. | Quick metadata injection from CLI. |
+| `--meta-file <file.json>` | empty | Metadata JSON from file. | Reuse structured metadata payload. |
+| `--codec store\|zstd\|lz4` | `store` | Codec for this write. | Per-entry compression control. |
+| `--level <n>` | `0` | Compression level. | Tune zstd quality/speed. |
+| `--chunk-size <bytes>` | `0` | Force chunk size for this entry. | Override text/binary defaults. |
+| `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Guard against oversized input. |
+| `--max-chunk-size <bytes>` | `0` | Open/write safety chunk bound. | Bound chunk processing. |
+
+Extra `replace` flag:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--keep-meta` | `true` | If no new meta is given, preserve current entry metadata. | Replace content without losing metadata. |
+
+## `rm`
+Syntax:
 ```bash
-go run ./cmd/fbx set-meta --meta-json '{"author":"A"}' books.fbx books/1.fb2
+fbx rm [flags] <container.fbx> [entry ...]
 ```
 
-Key flags: `--meta-json|--meta-file`, `--codec`, `--level`, `--chunk-size`, `--max-entry-size`, `--max-chunk-size`.
+Flags:
 
-### `rm`, `find`, `replace-text`
-- `rm`: delete entries by path/prefix/glob and predicate-like filters.
-- `find`: filter paths by prefix/glob/substring.
-- `replace-text`: bulk text replacement in matching entries.
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--prefix <p>` | empty | Remove entries by path prefix. | Bulk-delete directory subtree. |
+| `--glob <pattern>` | empty | Remove entries matching glob. | Pattern-based cleanup. |
+| `--contains <s>` | empty | Remove entries whose path contains substring. | Fast fuzzy filtering. |
+| `--min-size <bytes>` | `0` | Remove entries with `size >= min-size` (inclusive). | Example: prune large blobs only. |
+| `--max-size <bytes>` | `0` | Remove entries with `size <= max-size` (inclusive). | Example: remove tiny junk files. |
 
-Example:
+Selection logic:
+- Explicit `[entry ...]`, `--prefix`, and `--glob` are unioned (removed if any matches).
+- `--contains`, `--min-size`, `--max-size` form one predicate block (all specified conditions must pass).
+- Predicate block is also unioned with other selectors.
+
+Example from your question:
 ```bash
 go run ./cmd/fbx rm --contains books/ --min-size 1024 books.fbx
-go run ./cmd/fbx replace-text --find old --replace new --glob 'books/*.fb2' books.fbx
 ```
+Meaning: remove entries whose path contains `books/` **and** size is at least `1024` bytes.
 
-### `list`, `stat`, `extract`, `verify`
-- `list`: print `size path` for all entries.
-- `stat`: print metadata for one entry (`--json` optional).
-- `extract`: stream one entry to stdout or `-o` file.
-- `verify`: `dir|sample|all` integrity check.
-
-Examples:
+## `find`
+Syntax:
 ```bash
-go run ./cmd/fbx list books.fbx
-go run ./cmd/fbx stat --json books.fbx books/1.fb2
-go run ./cmd/fbx extract -o out.fb2 books.fbx books/1.fb2
-go run ./cmd/fbx verify --mode all books.fbx
+fbx find [flags] <container.fbx>
 ```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--prefix <p>` | empty | Keep paths starting with prefix. | Narrow to namespace/subtree. |
+| `--glob <pattern>` | empty | Keep paths matching glob. | Filename pattern filtering. |
+| `--contains <s>` | empty | Keep paths containing substring. | Quick fuzzy lookup. |
+
+Filter logic: all specified filters are AND-combined.
+
+## `stat`
+Syntax:
+```bash
+fbx stat [flags] <container.fbx> <entry-path>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--json` | `false` | Emit JSON object instead of key-value lines. | Script-friendly output. |
+| `--max-entry-size <bytes>` | `0` | Safety limit while opening container. | Defensive reads. |
+| `--max-chunk-size <bytes>` | `0` | Safety chunk bound while opening. | Defensive reads for untrusted data. |
+
+Output fields: `path`, `size`, `mtime_unix`, `mode`, `flags`, `meta_size` (+ `meta` when valid JSON and `--json`).
+
+## `info`
+Syntax:
+```bash
+fbx info [flags] <container.fbx>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--json` | `false` | Emit full JSON report. | Parse with scripts/tools. |
+
+What it reports:
+- Entry/chunk totals.
+- Codec summary: `store`, `zstd`, `lz4`, or `mixed(...)`.
+- Level summary: single level (`0`, `3`, ...) or `mixed(...)`.
+- Per-codec chunk counters.
+- Per-level chunk counters (`chunks_level_<n>`).
+
+## `set-meta`
+Syntax:
+```bash
+fbx set-meta [flags] <container.fbx> <entry-path>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--meta-json <json>` | empty | New metadata JSON payload. | Quick inline metadata update. |
+| `--meta-file <file.json>` | empty | New metadata from file. | Reuse larger metadata blobs. |
+| `--codec store\|zstd\|lz4` | `store` | Codec for rewritten entry body. | Re-encode while changing metadata. |
+| `--level <n>` | `0` | Compression level for rewrite. | Tune zstd rewrite ratio/speed. |
+| `--chunk-size <bytes>` | `0` | Chunk size for rewritten entry. | Control rewrite chunking. |
+| `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive operation on unknown files. |
+| `--max-chunk-size <bytes>` | `0` | Open/write chunk safety bound. | Prevent oversized chunk processing. |
+
+Note: `set-meta` rewrites the entry (content is read and written back), not just an in-place metadata patch.
+
+## `replace-text`
+Syntax:
+```bash
+fbx replace-text --find <old> --replace <new> [flags] <container.fbx>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--find <text>` | required | Byte sequence to search for. | Define replacement source. |
+| `--replace <text>` | empty string | Replacement byte sequence. | Define replacement target. |
+| `--prefix <p>` | empty | Limit by entry path prefix. | Restrict rewrite scope. |
+| `--glob <pattern>` | empty | Limit by glob pattern. | Pattern-targeted rewrite. |
+| `--dry-run` | `false` | Report matches without writing changes. | Safe preview before rewrite. |
+| `--codec store\|zstd\|lz4` | `store` | Codec for rewritten entries. | Re-encode while replacing. |
+| `--level <n>` | `0` | Compression level for rewritten entries. | zstd tuning. |
+| `--chunk-size <bytes>` | `0` | Chunk size for rewritten entries. | Control rewritten layout. |
+| `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive processing. |
+| `--max-chunk-size <bytes>` | `0` | Chunk safety bound. | Defensive processing. |
+
+Output: `entries_changed=<n> replacements=<m>`.
+
+Important: replacement is raw byte replacement; command currently buffers each matched entry in memory.
+
+## `list`
+Syntax:
+```bash
+fbx list <container.fbx>
+```
+
+Prints one line per entry: `<size>  <path>`.
+
+## `extract`
+Syntax:
+```bash
+fbx extract [flags] <container.fbx> <entry-path>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `-o <output>` | stdout | Write extracted data to file instead of stdout. | Save directly to disk. |
+| `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive extraction. |
+| `--max-chunk-size <bytes>` | `0` | Chunk safety bound. | Defensive extraction. |
+
+## `verify`
+Syntax:
+```bash
+fbx verify [flags] <container.fbx>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--mode dir\|sample\|all` | `dir` | Verification depth. | Trade speed vs confidence. |
+
+Modes:
+- `dir`: header + directory checks only.
+- `sample`: directory + sampled chunks.
+- `all`: directory + all chunks.
+
+Output: `entries_checked=<n> chunks_checked=<n> errors=<n>`.
+

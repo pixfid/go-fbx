@@ -79,6 +79,14 @@ type PackOptions struct {
 	VerifyIn     bool
 	MaxEntrySize uint64
 	MaxChunkSize uint32
+	Progress     func(PackProgress)
+}
+
+type PackProgress struct {
+	Phase        string
+	EntriesDone  int
+	EntriesTotal int
+	EntryPath    string
 }
 
 type EntryInfo struct {

@@ -61,3 +61,57 @@ func TestPackOutOfPlaceAndLimits(t *testing.T) {
 		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
 }
+
+func TestPackProgressCallback(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.fbx")
+	out := filepath.Join(dir, "out.fbx")
+	c, err := Create(in, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a.fb2", bytes.NewReader([]byte("a")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add a: %v", err)
+	}
+	if err := c.Add("b.fb2", bytes.NewReader([]byte("b")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add b: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var (
+		startSeen bool
+		doneSeen  bool
+		lastDone  int
+		total     int
+	)
+	err = Pack(in, out, &PackOptions{
+		Codec:    CodecStore,
+		VerifyIn: false,
+		Progress: func(ev PackProgress) {
+			switch ev.Phase {
+			case "start":
+				startSeen = true
+				total = ev.EntriesTotal
+			case "entry_done":
+				lastDone = ev.EntriesDone
+			case "done":
+				doneSeen = true
+				lastDone = ev.EntriesDone
+				total = ev.EntriesTotal
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if !startSeen || !doneSeen {
+		t.Fatalf("expected start and done progress events")
+	}
+	if total != 2 || lastDone != 2 {
+		t.Fatalf("unexpected progress totals: total=%d done=%d", total, lastDone)
+	}
+}

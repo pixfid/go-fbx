@@ -1198,4 +1198,82 @@ Suggested internal namespaces:
 
 ---
 
+# 23. Appendix C: Container Binary Layout (Pseudo-graphics)
+
+```text
+FBX file (append-only)
+
++0x00000000  Primary HeaderV1 (128 bytes)
+| magic[4]         = "FBXC"
+| version          (u16)
+| header_size      (u16, must be 128)
+| flags            (u32)
+| uuid[16]
+| created_unix     (u64)
+| dir_offset       (u64)
+| dir_size         (u64)
+| dir_crc32        (u32)
+| journal_offset   (u64)
+| journal_size     (u64)
+| reserved[56]
+
++0x00000080  Fixed Backup Header slot (128 bytes, used by current writer layout)
+| HeaderV1 mirror (same field layout)
+
++0x00000100..EOF   Append-only region
+| [ChunkRecordV1]...
+| [old DirectoryV1 blobs]...
+| [new active DirectoryV1 blob]
+| [JNL1 header-snapshot record] (commit-time)
+| [BKP1 header-snapshot record] (commit-time)
+
+ChunkRecordV1 (16 + comp_size bytes)
++0x00  magic[2]    = "CK"
++0x02  codec       (u8: 0=store,1=zstd,2=lz4)
++0x03  level       (u8)
++0x04  raw_size    (u32)
++0x08  comp_size   (u32)
++0x0C  crc32_raw   (u32)
++0x10  payload[comp_size]
+
+DirectoryV1 blob
++0x00  magic[4]    = "DIR1"
++0x04  entry_count (u32)
++0x08  flags       (u32, v1 writes 0)
++0x0C  build_unix  (u64)
++...   EntryV1[entry_count]
++...   Footer:
+       magic[4]    = "END1"
+       crc32       (u32)  // over bytes from DIR1 up to before END1
+       total_size  (u64)  // full directory blob size including footer
+
+EntryV1 (variable)
++0x00  path_hash64 (u64, FNV-1a)
++0x08  mtime_unix  (u64)
++0x10  mode        (u32)
++0x14  entry_flags (u32)
++0x18  file_size   (u64)
++0x20  chunk_count (u32)
++0x24  meta_size   (u32)
++0x28  path_size   (u32)
++0x2C  chunks[chunk_count] (ChunkRefV1)
++...   meta[meta_size]
++...   path[path_size] (UTF-8)
+
+ChunkRefV1 (32 bytes)
++0x00  chunk_offset (u64)
++0x08  raw_offset   (u64)
++0x10  raw_size     (u32)
++0x14  comp_size    (u32)
++0x18  crc32_raw    (u32)
++0x1C  reserved     (u32, must be 0)
+
+JNL1/BKP1 header snapshot record (148 bytes each)
++0x00  magic[4]        = "JNL1" or "BKP1"
++0x04  ts_unix         (u64)
++0x0C  header_bytes[128] (HeaderV1)
++0x8C  header_crc32    (u32)
++0x90  record_crc32    (u32) // over all previous record bytes
+```
+
 ## End of document

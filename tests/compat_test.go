@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"go-fbx/fbx"
-	"go-fbx/internal/format"
+	"github.com/pixfid/go-fbx/fbx"
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 type vectorManifest struct {
