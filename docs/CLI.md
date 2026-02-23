@@ -26,7 +26,7 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 - `--level` default is `0`:
   - for `zstd`, `0` maps to fast mode (not zstd default level 3)
   - for `store`, ignored
-  - for `lz4`, currently not used by codec implementation
+  - for `lz4`, `0` = fast mode, `1..9` = higher-compression HC profile (values above `9` are treated as `9`)
 - Progress bar redraw is one line: `[done/total] ▓▓▓...`.
 
 ## `convert-zip`
@@ -43,7 +43,7 @@ Flags:
 | `--meta-file <file.json>` | `""` | JSON map `path -> metadata object`; merged over auto metadata. | Inject custom metadata (IDs, titles, source tags). |
 | `--prefix <p>` | `""` | Prepends path prefix inside FBX. | Place imported files under `books/`, `images/`, etc. |
 | `--codec store\|zstd\|lz4` | `store` | Codec for newly written chunks. | Trade compression ratio vs speed. |
-| `--level <n>` | `0` | Compression level passed to writer. | Tune zstd compression. |
+| `--level <n>` | `0` | Compression level passed to writer. | Tune zstd or lz4 HC compression. |
 | `--progress` | `true` | Show one-line progress bar. | Observe long imports. |
 | `--overwrite` | `false` | Allow replacing existing output file. | Controlled overwrite in scripts. |
 | `--max-entry-size <bytes>` | `0` | Reject too-large entries while reading/writing. | Protect RAM/CPU on untrusted ZIP. |
@@ -82,7 +82,7 @@ Flags:
 |---|---:|---|---|
 | `-o <output.fbx>` | in-place | Output path. If omitted, rewrites input in place via temp+rename. | Keep original as source or compact in place. |
 | `--codec store\|zstd\|lz4` | `store` | Rewrites all live entries with selected codec. | Change container-wide codec policy. |
-| `--level <n>` | `0` | Compression level for rewritten chunks. | Control zstd speed/ratio tradeoff. |
+| `--level <n>` | `0` | Compression level for rewritten chunks. | Control zstd/lz4 speed vs ratio tradeoff. |
 | `--chunk-text <bytes>` | `0` | Text chunk size override during repack. | Optimize text extraction throughput. |
 | `--chunk-bin <bytes>` | `0` | Binary chunk size override during repack. | Optimize binary chunking layout. |
 | `--workers <n>` | `0` | Parallel compression workers (`0` = library default). | Speed up heavy recompression. |
@@ -112,7 +112,7 @@ Shared flags (`add`/`upsert`/`replace`):
 | `--meta-json <json>` | empty | Inline metadata JSON. | Quick metadata injection from CLI. |
 | `--meta-file <file.json>` | empty | Metadata JSON from file. | Reuse structured metadata payload. |
 | `--codec store\|zstd\|lz4` | `store` | Codec for this write. | Per-entry compression control. |
-| `--level <n>` | `0` | Compression level. | Tune zstd quality/speed. |
+| `--level <n>` | `0` | Compression level. | Tune zstd/lz4 quality vs speed. |
 | `--chunk-size <bytes>` | `0` | Force chunk size for this entry. | Override text/binary defaults. |
 | `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Guard against oversized input. |
 | `--max-chunk-size <bytes>` | `0` | Open/write safety chunk bound. | Bound chunk processing. |
@@ -214,7 +214,7 @@ Flags:
 | `--meta-json <json>` | empty | New metadata JSON payload. | Quick inline metadata update. |
 | `--meta-file <file.json>` | empty | New metadata from file. | Reuse larger metadata blobs. |
 | `--codec store\|zstd\|lz4` | `store` | Codec for rewritten entry body. | Re-encode while changing metadata. |
-| `--level <n>` | `0` | Compression level for rewrite. | Tune zstd rewrite ratio/speed. |
+| `--level <n>` | `0` | Compression level for rewrite. | Tune zstd/lz4 rewrite ratio/speed. |
 | `--chunk-size <bytes>` | `0` | Chunk size for rewritten entry. | Control rewrite chunking. |
 | `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive operation on unknown files. |
 | `--max-chunk-size <bytes>` | `0` | Open/write chunk safety bound. | Prevent oversized chunk processing. |
@@ -237,7 +237,7 @@ Flags:
 | `--glob <pattern>` | empty | Limit by glob pattern. | Pattern-targeted rewrite. |
 | `--dry-run` | `false` | Report matches without writing changes. | Safe preview before rewrite. |
 | `--codec store\|zstd\|lz4` | `store` | Codec for rewritten entries. | Re-encode while replacing. |
-| `--level <n>` | `0` | Compression level for rewritten entries. | zstd tuning. |
+| `--level <n>` | `0` | Compression level for rewritten entries. | zstd/lz4 tuning. |
 | `--chunk-size <bytes>` | `0` | Chunk size for rewritten entries. | Control rewritten layout. |
 | `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive processing. |
 | `--max-chunk-size <bytes>` | `0` | Chunk safety bound. | Defensive processing. |
@@ -286,4 +286,3 @@ Modes:
 - `all`: directory + all chunks.
 
 Output: `entries_checked=<n> chunks_checked=<n> errors=<n>`.
-

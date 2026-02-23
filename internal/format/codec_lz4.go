@@ -6,7 +6,7 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-func lz4Compress(src []byte) ([]byte, error) {
+func lz4Compress(src []byte, level int) ([]byte, error) {
 	if len(src) == 0 {
 		return nil, ErrInvalidChunk
 	}
@@ -15,7 +15,7 @@ func lz4Compress(src []byte) ([]byte, error) {
 		return nil, ErrBadCodec
 	}
 	out := make([]byte, bound)
-	n, err := lz4.CompressBlock(src, out, nil)
+	n, err := lz4CompressWithLevel(src, out, level)
 	if err != nil {
 		return nil, fmt.Errorf("fbx: lz4 compress failed: %w", err)
 	}
@@ -23,6 +23,38 @@ func lz4Compress(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("fbx: lz4 compress failed")
 	}
 	return out[:n], nil
+}
+
+func lz4CompressWithLevel(src, dst []byte, level int) (int, error) {
+	if level <= 0 {
+		return lz4.CompressBlock(src, dst, nil)
+	}
+	return lz4.CompressBlockHC(src, dst, mapLZ4Level(level), nil, nil)
+}
+
+func mapLZ4Level(level int) lz4.CompressionLevel {
+	switch {
+	case level <= 0:
+		return lz4.Fast
+	case level == 1:
+		return lz4.Level1
+	case level == 2:
+		return lz4.Level2
+	case level == 3:
+		return lz4.Level3
+	case level == 4:
+		return lz4.Level4
+	case level == 5:
+		return lz4.Level5
+	case level == 6:
+		return lz4.Level6
+	case level == 7:
+		return lz4.Level7
+	case level == 8:
+		return lz4.Level8
+	default:
+		return lz4.Level9
+	}
 }
 
 func lz4Decompress(src []byte, expected int) ([]byte, error) {

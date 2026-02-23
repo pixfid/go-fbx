@@ -7,7 +7,7 @@ func compressPayload(raw []byte, codec Codec, level uint8) ([]byte, error) {
 	case CodecZstd:
 		return zstdCompress(raw, int(level))
 	case CodecLZ4:
-		return lz4Compress(raw)
+		return lz4Compress(raw, int(level))
 	default:
 		return nil, ErrBadCodec
 	}
