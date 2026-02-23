@@ -13,9 +13,11 @@
   - внедрить переиспользование encoder/decoder через кэш/пулы
   - статус: выполнено через кэш-пулы encoder/decoder с бакетизацией лимитов decoder
 
-- [ ] 3. Снижение аллокаций в chunk pipeline
+- [x] 3. Снижение аллокаций в chunk pipeline
   - пулы буферов для записи чанков
   - уменьшить лишние копирования `[]byte`
+  - статус: выполнено (`writeChunksSequential` без лишнего copy, `writeChunksParallel` с `sync.Pool` буферов)
+  - наблюдение: `BenchmarkContainerAddExtract1MiB` ~`520486 ns/op`, `110 allocs/op`
 
 - [x] 4. LZ4: поддержка уровней сжатия
   - использовать `--level`/`WriteOptions.Level` для LZ4

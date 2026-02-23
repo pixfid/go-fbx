@@ -497,11 +497,10 @@ func (tx *Tx) writeChunksSequential(r io.Reader, codec format.Codec, level uint8
 			return nil, rawOff, readErr
 		}
 
-		raw := append([]byte(nil), buf[:n]...)
-		if maxEntry > 0 && rawOff+uint64(len(raw)) > maxEntry {
+		if maxEntry > 0 && rawOff+uint64(n) > maxEntry {
 			return nil, rawOff, ErrLimitExceeded
 		}
-		rec, crc, err := format.EncodeChunkRecord(raw, codec, level)
+		rec, crc, err := format.EncodeChunkRecord(buf[:n], codec, level)
 		if err != nil {
 			return nil, rawOff, mapErr(err)
 		}
@@ -531,6 +530,11 @@ func (tx *Tx) writeChunksParallel(r io.Reader, codec format.Codec, level uint8, 
 	results := make(chan chunkResult, workers*2)
 	produceErrCh := make(chan error, 1)
 	rawTotalCh := make(chan uint64, 1)
+	bufPool := sync.Pool{
+		New: func() any {
+			return make([]byte, chunkSize)
+		},
+	}
 
 	var workerWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -539,6 +543,7 @@ func (tx *Tx) writeChunksParallel(r io.Reader, codec format.Codec, level uint8, 
 			defer workerWG.Done()
 			for j := range jobs {
 				rec, crc, err := format.EncodeChunkRecord(j.raw, codec, level)
+				bufPool.Put(j.raw[:chunkSize])
 				if err != nil {
 					results <- chunkResult{index: j.index, rawOff: j.rawOff, err: mapErr(err)}
 					continue
@@ -561,25 +566,29 @@ func (tx *Tx) writeChunksParallel(r io.Reader, codec format.Codec, level uint8, 
 
 	go func() {
 		defer close(jobs)
-		buf := make([]byte, chunkSize)
 		idx := 0
 		var rawOff uint64
 		var produceErr error
 		for {
+			buf := bufPool.Get().([]byte)
 			n, readErr := io.ReadFull(r, buf)
 			if readErr == io.EOF {
+				bufPool.Put(buf)
 				break
 			}
 			if readErr == io.ErrUnexpectedEOF {
 				if n == 0 {
+					bufPool.Put(buf)
 					break
 				}
 			} else if readErr != nil {
+				bufPool.Put(buf)
 				produceErr = readErr
 				break
 			}
-			raw := append([]byte(nil), buf[:n]...)
-			if maxEntry > 0 && rawOff+uint64(len(raw)) > maxEntry {
+			raw := buf[:n]
+			if maxEntry > 0 && rawOff+uint64(n) > maxEntry {
+				bufPool.Put(buf)
 				produceErr = ErrLimitExceeded
 				break
 			}
