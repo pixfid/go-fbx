@@ -59,16 +59,10 @@ func Pack(inPath, outPath string, opts *PackOptions) error {
 }
 
 func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
-	var inOpts *Options
-	if opts.MaxEntrySize > 0 || opts.MaxChunkSize > 0 {
-		inOpts = &Options{
-			DetectText:               true,
-			StoreIfAlreadyCompressed: true,
-			SyncOnCommit:             true,
-			StrictVerify:             true,
-			MaxEntrySize:             opts.MaxEntrySize,
-			MaxChunkSize:             opts.MaxChunkSize,
-		}
+	inOpts := &Options{
+		StrictVerify: !opts.FastUnsafe,
+		MaxEntrySize: opts.MaxEntrySize,
+		MaxChunkSize: opts.MaxChunkSize,
 	}
 	src, err := Open(inPath, inOpts)
 	if err != nil {
@@ -113,6 +107,9 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 	}
 	if opts.MaxChunkSize > 0 {
 		outCfg.MaxChunkSize = opts.MaxChunkSize
+	}
+	if opts.FastUnsafe {
+		outCfg.SyncOnCommit = false
 	}
 	dst, err := Create(outPath, &outCfg)
 	if err != nil {

@@ -71,7 +71,7 @@ func usage() {
 Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
   fbx interactive [--max-entry-size bytes] [--max-chunk-size bytes] [container.fbx]
-  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
+  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
@@ -1582,6 +1582,7 @@ func runPack(args []string) int {
 	chunkBin := fs.Int("chunk-bin", 0, "binary chunk size in bytes")
 	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
 	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
+	fastUnsafe := fs.Bool("fast", false, "faster unsafe mode: disable CRC read checks and fsync on output")
 	showProgress := fs.Bool("progress", true, "show pack progress")
 	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
 	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
@@ -1604,6 +1605,7 @@ func runPack(args []string) int {
 		ChunkBin:     *chunkBin,
 		Workers:      *workers,
 		VerifyIn:     *verifyIn,
+		FastUnsafe:   *fastUnsafe,
 		MaxEntrySize: *maxEntrySize,
 	}
 	if *showProgress {

@@ -77,6 +77,7 @@ type PackOptions struct {
 	ChunkBin     int
 	Workers      int
 	VerifyIn     bool
+	FastUnsafe   bool
 	MaxEntrySize uint64
 	MaxChunkSize uint32
 	Progress     func(PackProgress)

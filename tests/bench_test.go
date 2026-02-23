@@ -71,18 +71,22 @@ func BenchmarkContainerAddExtract1MiB(b *testing.B) {
 }
 
 func BenchmarkPackSmall(b *testing.B) {
-	benchmarkPackContainer(b, 32, 8<<10)
+	benchmarkPackContainer(b, 32, 8<<10, false)
 }
 
 func BenchmarkPackMedium(b *testing.B) {
-	benchmarkPackContainer(b, 128, 32<<10)
+	benchmarkPackContainer(b, 128, 32<<10, false)
 }
 
 func BenchmarkPackLarge(b *testing.B) {
-	benchmarkPackContainer(b, 256, 64<<10)
+	benchmarkPackContainer(b, 256, 64<<10, false)
 }
 
-func benchmarkPackContainer(b *testing.B, entryCount int, payloadSize int) {
+func BenchmarkPackMediumFastUnsafe(b *testing.B) {
+	benchmarkPackContainer(b, 128, 32<<10, true)
+}
+
+func benchmarkPackContainer(b *testing.B, entryCount int, payloadSize int, fastUnsafe bool) {
 	dir := b.TempDir()
 	srcPath := filepath.Join(dir, "src.fbx")
 	dstPath := filepath.Join(dir, "dst.fbx")
@@ -109,10 +113,11 @@ func benchmarkPackContainer(b *testing.B, entryCount int, payloadSize int) {
 	}
 
 	opts := &fbx.PackOptions{
-		Codec:    fbx.CodecZstd,
-		Level:    3,
-		Workers:  4,
-		VerifyIn: false,
+		Codec:      fbx.CodecZstd,
+		Level:      3,
+		Workers:    4,
+		VerifyIn:   false,
+		FastUnsafe: fastUnsafe,
 	}
 	totalBytes := int64(entryCount * payloadSize)
 	b.ReportAllocs()

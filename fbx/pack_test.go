@@ -2,9 +2,13 @@ package fbx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 func TestPickChunkSize(t *testing.T) {
@@ -114,4 +118,105 @@ func TestPackProgressCallback(t *testing.T) {
 	if total != 2 || lastDone != 2 {
 		t.Fatalf("unexpected progress totals: total=%d done=%d", total, lastDone)
 	}
+}
+
+func TestPackFastUnsafeBypassesChunkCRC(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.fbx")
+	outStrict := filepath.Join(dir, "strict.fbx")
+	outFast := filepath.Join(dir, "fast.fbx")
+	orig := bytes.Repeat([]byte("payload-"), 256)
+
+	c, err := Create(in, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a.fb2", bytes.NewReader(orig), nil, &WriteOptions{Codec: CodecStore}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := corruptFirstChunkPayloadByte(in); err != nil {
+		t.Fatalf("corrupt chunk: %v", err)
+	}
+	src, err := Open(in, nil)
+	if err != nil {
+		t.Fatalf("open corrupted source: %v", err)
+	}
+	var probe bytes.Buffer
+	srcErr := src.Extract("a.fb2", &probe)
+	_ = src.Close()
+	if !errors.Is(srcErr, ErrCRCMismatch) {
+		t.Fatalf("expected corrupted source extract to fail with ErrCRCMismatch, got %v", srcErr)
+	}
+
+	err = Pack(in, outStrict, &PackOptions{Codec: CodecStore, VerifyIn: true})
+	if !errors.Is(err, ErrCRCMismatch) {
+		t.Fatalf("expected ErrCRCMismatch with input verification, got %v", err)
+	}
+
+	if err := Pack(in, outFast, &PackOptions{Codec: CodecStore, VerifyIn: false, FastUnsafe: true}); err != nil {
+		t.Fatalf("pack fast mode: %v", err)
+	}
+	co, err := Open(outFast, nil)
+	if err != nil {
+		t.Fatalf("open packed fast output: %v", err)
+	}
+	defer co.Close()
+	var got bytes.Buffer
+	if err := co.Extract("a.fb2", &got); err != nil {
+		t.Fatalf("extract packed fast output: %v", err)
+	}
+	if bytes.Equal(got.Bytes(), orig) {
+		t.Fatalf("expected fast mode to pack corrupted payload bytes")
+	}
+}
+
+func corruptFirstChunkPayloadByte(containerPath string) error {
+	f, err := os.OpenFile(containerPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	headBuf := make([]byte, format.HeaderSize)
+	if _, err := f.ReadAt(headBuf, 0); err != nil {
+		return err
+	}
+	h, err := format.UnmarshalHeaderV1(headBuf)
+	if err != nil {
+		return err
+	}
+	dirBlob := make([]byte, h.DirSize)
+	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+		return err
+	}
+	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	if err != nil {
+		return err
+	}
+	if len(dir.Entries) == 0 || len(dir.Entries[0].Chunks) == 0 {
+		return ErrInvalidFormat
+	}
+	first := dir.Entries[0].Chunks[0]
+	head := make([]byte, 16)
+	if _, err := f.ReadAt(head, int64(first.ChunkOffset)); err != nil {
+		return err
+	}
+	compSize := binary.LittleEndian.Uint32(head[8:12])
+	if compSize == 0 {
+		return ErrInvalidFormat
+	}
+	payloadOff := int64(first.ChunkOffset) + 16
+	b := []byte{0}
+	if _, err := f.ReadAt(b, payloadOff); err != nil {
+		return err
+	}
+	b[0] ^= 0xFF
+	if _, err := f.WriteAt(b, payloadOff); err != nil {
+		return err
+	}
+	return nil
 }

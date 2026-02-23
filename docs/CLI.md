@@ -87,6 +87,7 @@ Flags:
 | `--chunk-bin <bytes>` | `0` | Binary chunk size override during repack. | Optimize binary chunking layout. |
 | `--workers <n>` | `0` | Parallel compression workers (`0` = library default). | Speed up heavy recompression. |
 | `--verify-in` | `true` | Verify input container before repack. | Catch corruption early. |
+| `--fast` | `false` | Unsafe speed profile: disable CRC read checks during repack and disable output fsync on commit. | Max throughput for trusted data and disposable runs. |
 | `--progress` | `true` | One-line repack progress bar. | Visibility for long repacks. |
 | `--max-entry-size <bytes>` | `0` | Safety limit during read/write. | Harden repack for untrusted files. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
