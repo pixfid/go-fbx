@@ -6,6 +6,7 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 - `convert-zip` — import ZIP into FBX.
 - `interactive` — TUI browser/editor.
 - `pack` — rebuild container from live entries.
+- `pack-many` — parallel repack for multiple FBX files.
 - `add` / `upsert` / `replace` — write one file into container.
 - `rm` / `find` — filter/remove by path and size predicates.
 - `stat` / `info` / `list` — inspect container and entries.
@@ -91,6 +92,36 @@ Flags:
 | `--progress` | `true` | One-line repack progress bar. | Visibility for long repacks. |
 | `--max-entry-size <bytes>` | `0` | Safety limit during read/write. | Harden repack for untrusted files. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
+
+## `pack-many`
+Syntax:
+```bash
+fbx pack-many [flags] <input1.fbx> [input2.fbx ...]
+```
+
+Runs `pack` in parallel across many containers (always in-place per file).
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--jobs <n>` | `GOMAXPROCS` | Number of files processed in parallel. | Scale throughput on multi-core systems. |
+| `--glob <pattern>` | empty | Adds inputs by glob (`*.fbx`, `data/*.fbx`). | Batch-select files without listing each one. |
+| `--codec store\|zstd\|lz4` | `store` | Repack codec for all inputs. | Apply one codec policy to many files. |
+| `--level <n>` | `0` | Compression level for all inputs. | Batch tune speed/ratio. |
+| `--chunk-text <bytes>` | `0` | Text chunk size override. | Unified text chunking across files. |
+| `--chunk-bin <bytes>` | `0` | Binary chunk size override. | Unified binary chunking across files. |
+| `--workers <n>` | `0` | Per-file compression workers. | Tune per-job CPU usage. |
+| `--verify-in` | `true` | Verify each input before repack. | Early corruption detection in batch runs. |
+| `--fast` | `false` | Unsafe fast profile per file (`StrictVerify=false`, `SyncOnCommit=false`). | Maximum throughput on trusted input sets. |
+| `--max-entry-size <bytes>` | `0` | Safety entry bound per file. | Bound resource usage in bulk mode. |
+| `--max-chunk-size <bytes>` | `0` | Safety chunk bound per file. | Bound decompression/chunk processing. |
+
+Examples:
+```bash
+fbx pack-many --jobs 4 --codec zstd --level 10 --verify-in /data/*.fbx
+fbx pack-many --glob '/data/*.fbx' --jobs 6 --codec zstd --level 10 --fast
+```
 
 ## `add`, `upsert`, `replace`
 Syntax:

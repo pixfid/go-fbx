@@ -11,9 +11,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +36,8 @@ func main() {
 		os.Exit(runInteractive(os.Args[2:]))
 	case "pack":
 		os.Exit(runPack(os.Args[2:]))
+	case "pack-many":
+		os.Exit(runPackMany(os.Args[2:]))
 	case "add":
 		os.Exit(runAdd(os.Args[2:]))
 	case "upsert":
@@ -72,6 +76,7 @@ Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
   fbx interactive [--max-entry-size bytes] [--max-chunk-size bytes] [container.fbx]
   fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
+  fbx pack-many [--jobs n] [--glob pattern] [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--max-entry-size bytes] [--max-chunk-size bytes] <input1.fbx> [input2.fbx ...]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
@@ -1576,7 +1581,7 @@ func readChunkHeaderAt(r io.ReaderAt, off int64) (format.Codec, uint8, error) {
 func runPack(args []string) int {
 	fs := flag.NewFlagSet("pack", flag.ContinueOnError)
 	out := fs.String("o", "", "output file (default: in-place rewrite)")
-	codec := fs.String("codec", "store", "chunk codec: store|zstd|lz4")
+	codecStr := fs.String("codec", "store", "chunk codec: store|zstd|lz4")
 	level := fs.Int("level", 0, "codec compression level")
 	chunkText := fs.Int("chunk-text", 0, "text chunk size in bytes")
 	chunkBin := fs.Int("chunk-bin", 0, "binary chunk size in bytes")
@@ -1617,22 +1622,151 @@ func runPack(args []string) int {
 		return 2
 	}
 	popts.MaxChunkSize = uint32(*maxChunkSize)
-	switch *codec {
-	case "store":
-		popts.Codec = fbx.CodecStore
-	case "zstd":
-		popts.Codec = fbx.CodecZstd
-	case "lz4":
-		popts.Codec = fbx.CodecLZ4
-	default:
-		fmt.Fprintln(os.Stderr, "--codec must be store|zstd|lz4")
+	codec, err := parseCodec(*codecStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
+	popts.Codec = codec
 	if err := fbx.Pack(input, output, popts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+func runPackMany(args []string) int {
+	fs := flag.NewFlagSet("pack-many", flag.ContinueOnError)
+	jobs := fs.Int("jobs", 0, "number of files to pack in parallel (default: GOMAXPROCS)")
+	glob := fs.String("glob", "", "glob pattern for input containers")
+	codecStr := fs.String("codec", "store", "chunk codec: store|zstd|lz4")
+	level := fs.Int("level", 0, "codec compression level")
+	chunkText := fs.Int("chunk-text", 0, "text chunk size in bytes")
+	chunkBin := fs.Int("chunk-bin", 0, "binary chunk size in bytes")
+	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
+	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
+	fastUnsafe := fs.Bool("fast", false, "faster unsafe mode: disable CRC read checks and fsync on output")
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 && *glob == "" {
+		fmt.Fprintln(os.Stderr, "pack-many requires at least one input file or --glob pattern")
+		return 2
+	}
+	if *maxChunkSize > uint64(^uint32(0)) {
+		fmt.Fprintf(os.Stderr, "--max-chunk-size must be <= %d\n", uint64(^uint32(0)))
+		return 2
+	}
+	codec, err := parseCodec(*codecStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	popts := fbx.PackOptions{
+		Codec:        codec,
+		Level:        *level,
+		ChunkText:    *chunkText,
+		ChunkBin:     *chunkBin,
+		Workers:      *workers,
+		VerifyIn:     *verifyIn,
+		FastUnsafe:   *fastUnsafe,
+		MaxEntrySize: *maxEntrySize,
+		MaxChunkSize: uint32(*maxChunkSize),
+	}
+
+	inputs := make([]string, 0, fs.NArg()+32)
+	inputs = append(inputs, fs.Args()...)
+	if *glob != "" {
+		matches, err := filepath.Glob(*glob)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		inputs = append(inputs, matches...)
+	}
+	inputs = uniqueSortedStrings(inputs)
+	if len(inputs) == 0 {
+		fmt.Fprintln(os.Stderr, "pack-many: no input files matched")
+		return 2
+	}
+
+	parallel := *jobs
+	if parallel <= 0 {
+		parallel = runtime.GOMAXPROCS(0)
+	}
+	if parallel > len(inputs) {
+		parallel = len(inputs)
+	}
+	if parallel <= 0 {
+		parallel = 1
+	}
+
+	type packManyResult struct {
+		path string
+		err  error
+	}
+	workCh := make(chan string, len(inputs))
+	resCh := make(chan packManyResult, len(inputs))
+	for _, p := range inputs {
+		workCh <- p
+	}
+	close(workCh)
+
+	var wg sync.WaitGroup
+	for i := 0; i < parallel; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range workCh {
+				opts := popts
+				err := fbx.Pack(p, p, &opts)
+				resCh <- packManyResult{path: p, err: err}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(resCh)
+	}()
+
+	done := 0
+	failed := 0
+	for res := range resCh {
+		done++
+		if res.err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "[%d/%d] FAIL %s: %v\n", done, len(inputs), res.path, res.err)
+			continue
+		}
+		fmt.Printf("[%d/%d] OK %s\n", done, len(inputs), res.path)
+	}
+	fmt.Printf("pack-many: total=%d success=%d failed=%d\n", len(inputs), len(inputs)-failed, failed)
+	if failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+func uniqueSortedStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func runAdd(args []string) int {

@@ -368,6 +368,38 @@ func TestRunInfoAndInspectCodecs(t *testing.T) {
 	}
 }
 
+func TestRunPackMany(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{
+		filepath.Join(dir, "a.fbx"),
+		filepath.Join(dir, "b.fbx"),
+	}
+	for _, p := range paths {
+		c, err := fbx.Create(p, nil)
+		if err != nil {
+			t.Fatalf("create %s: %v", p, err)
+		}
+		if err := c.Add("book.fb2", bytes.NewReader(bytes.Repeat([]byte("text-"), 128)), nil, &fbx.WriteOptions{Codec: fbx.CodecStore}); err != nil {
+			_ = c.Close()
+			t.Fatalf("add %s: %v", p, err)
+		}
+		_ = c.Close()
+	}
+
+	if code := runPackMany([]string{"--jobs", "2", "--codec", "zstd", "--level", "3", paths[0], paths[1]}); code != 0 {
+		t.Fatalf("runPackMany exit code: %d", code)
+	}
+	for _, p := range paths {
+		rep, err := inspectContainerCodecs(p)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", p, err)
+		}
+		if rep.ChunkCounts["zstd"] == 0 {
+			t.Fatalf("expected zstd chunks in %s, got %+v", p, rep.ChunkCounts)
+		}
+	}
+}
+
 func TestBrowserModelNavigationAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	containerPath := filepath.Join(dir, "ui.fbx")
