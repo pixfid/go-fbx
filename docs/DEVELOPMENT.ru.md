@@ -13,7 +13,13 @@
 go build ./...
 go test ./...
 go test -run TestCanonicalVectors ./tests
+go test -run TestPerfGuard ./tests
 go test -bench . ./tests
+```
+
+Обновление целевых baseline-метрик:
+```bash
+go test -bench 'BenchmarkEncodeChunkZstd1MiB|BenchmarkContainerAddExtract1MiB|BenchmarkPackMedium(FastUnsafe)?$' -benchmem ./tests
 ```
 
 Пересоздание векторов:

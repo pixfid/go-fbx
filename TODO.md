@@ -34,6 +34,8 @@
   - рекомендации/инструменты для параллельной упаковки множества файлов
   - статус: выполнено, добавлена CLI-команда `pack-many` (`--jobs`, `--glob`, общие флаги pack)
 
-- [ ] 7. Регресс-контроль производительности
+- [x] 7. Регресс-контроль производительности
   - зафиксировать метрики до/после
   - добавить guard от performance regression
+  - статус: выполнено, добавлены guard-тесты `tests/perf_guard_test.go`
+  - after (2026-02-23): `EncodeChunkZstd1MiB ~216.8µs`, `ContainerAddExtract1MiB ~525.9µs`, `PackMedium ~29.3ms`, `PackMediumFastUnsafe ~6.5ms`
