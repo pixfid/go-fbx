@@ -183,7 +183,7 @@ struct HeaderV1 {
   u32  dir_crc32;       // CRC32 of active Directory blob (same as footer.crc32)
   u64  journal_offset;  // 0 in v1 unless journal is implemented
   u64  journal_size;    // 0 in v1 unless journal is implemented
-  u8   reserved[56];    // MUST be zero for v1 writers; readers MUST ignore contents
+  u8   reserved[56];    // v1 baseline: zero; readers MUST ignore contents (see extension profile in §17)
 }
 ```
 
@@ -440,7 +440,11 @@ A compliant writer:
 5. MUST enforce chunk invariants:
    - non-overlapping, complete coverage to file_size.
 6. SHOULD use append-only commit semantics (see §11.6).
-7. MUST write reserved fields as zero in v1.
+7. SHOULD write reserved fields as zero in baseline v1.
+8. MAY use reserved bytes for implementation-private hints if:
+   - core format semantics are unchanged,
+   - readers that ignore hints still work correctly,
+   - and hint bytes are treated as advisory only.
 
 ---
 
@@ -532,6 +536,8 @@ This minimizes directory rewrite overhead and ensures predictable performance re
 4. Commit directory in new container.
 5. Atomically replace old file (implementation-specific; usually temp+rename).
 
+When compaction-hint counters are used (see §17), `pack` SHOULD reset them to zero in the newly created compacted container.
+
 ---
 
 ## 14. Verification (`verify`) (Normative for tooling)
@@ -583,7 +589,12 @@ FBX v1 provides integrity (CRC32) but not cryptographic authenticity.
 ## 17. Compatibility and Extensibility
 
 - Unknown header flags MUST be ignored by readers.
-- Reserved fields MUST be zero for v1 writers.
+- Baseline v1 writers SHOULD keep reserved fields zero.
+- Implementations MAY define private reserved-byte hints without version bump, as long as readers that ignore them remain fully compatible.
+- `go-fbx` profile reserved-byte hints (HeaderV1.reserved):
+  - `reserved[8:16]` (`u64`, little-endian): `dead_bytes` (estimated obsolete chunk bytes).
+  - `reserved[16:24]` (`u64`, little-endian): `churn_ops` (replace/remove-like operations that created obsolete data).
+  - these values are advisory; they MUST NOT affect correctness of parsing/extraction.
 - Future versions may add:
   - journal region (HAS_JOURNAL) with defined semantics
   - backup header

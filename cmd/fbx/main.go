@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -261,6 +262,9 @@ type codecReport struct {
 	Codec        string         `json:"codec"`
 	Level        string         `json:"level"`
 	LevelCounts  map[string]int `json:"level_counts"`
+	DeadBytes    uint64         `json:"dead_bytes"`
+	ChurnOps     uint64         `json:"churn_ops"`
+	FileSize     uint64         `json:"file_size"`
 }
 
 func runInfo(args []string) int {
@@ -287,6 +291,9 @@ func runInfo(args []string) int {
 	fmt.Printf("chunks_total=%d\n", report.ChunksTotal)
 	fmt.Printf("codec=%s\n", report.Codec)
 	fmt.Printf("level=%s\n", report.Level)
+	fmt.Printf("dead_bytes=%d\n", report.DeadBytes)
+	fmt.Printf("churn_ops=%d\n", report.ChurnOps)
+	fmt.Printf("file_size=%d\n", report.FileSize)
 	keys := make([]string, 0, len(report.ChunkCounts))
 	for k := range report.ChunkCounts {
 		keys = append(keys, k)
@@ -327,6 +334,10 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 		return codecReport{}, err
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return codecReport{}, err
+	}
 
 	headBuf := make([]byte, format.HeaderSize)
 	if _, err := f.ReadAt(headBuf, 0); err != nil {
@@ -336,6 +347,8 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 	if err != nil {
 		return codecReport{}, err
 	}
+	deadBytes := binary.LittleEndian.Uint64(h.Reserved[8:16])
+	churnOps := binary.LittleEndian.Uint64(h.Reserved[16:24])
 	dirBlob := make([]byte, h.DirSize)
 	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
 		return codecReport{}, err
@@ -399,6 +412,9 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 		Codec:        codecSummary,
 		Level:        levelSummary,
 		LevelCounts:  levelCounts,
+		DeadBytes:    deadBytes,
+		ChurnOps:     churnOps,
+		FileSize:     uint64(st.Size()),
 	}, nil
 }
 
@@ -714,6 +730,9 @@ func containerMatchesPackParams(containerPath string, codec fbx.Codec, level int
 	report, err := inspectContainerCodecs(containerPath)
 	if err != nil {
 		return false, err
+	}
+	if report.DeadBytes > 0 {
+		return false, nil
 	}
 	total := report.ChunksTotal
 	codecKey := codecName(codec)

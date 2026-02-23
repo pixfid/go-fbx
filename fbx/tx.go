@@ -19,6 +19,8 @@ type Tx struct {
 	c            *Container
 	entries      map[string]format.EntryV1
 	appendOffset uint64
+	deadBytes    uint64
+	churnOps     uint64
 	closed       bool
 }
 
@@ -49,6 +51,9 @@ func (tx *Tx) Upsert(path string, r io.Reader, meta []byte, wopts *WriteOptions)
 	if err != nil {
 		return ErrPathInvalid
 	}
+	if old, ok := tx.entries[norm]; ok {
+		tx.markObsolete(old)
+	}
 	e, err := tx.writeEntry(norm, r, meta, wopts)
 	if err != nil {
 		return err
@@ -65,9 +70,11 @@ func (tx *Tx) Replace(path string, r io.Reader, meta []byte, wopts *WriteOptions
 	if err != nil {
 		return ErrPathInvalid
 	}
-	if _, ok := tx.entries[norm]; !ok {
+	old, ok := tx.entries[norm]
+	if !ok {
 		return ErrNotFound
 	}
+	tx.markObsolete(old)
 	e, err := tx.writeEntry(norm, r, meta, wopts)
 	if err != nil {
 		return err
@@ -84,9 +91,11 @@ func (tx *Tx) Remove(path string) error {
 	if err != nil {
 		return ErrPathInvalid
 	}
-	if _, ok := tx.entries[norm]; !ok {
+	old, ok := tx.entries[norm]
+	if !ok {
 		return ErrNotFound
 	}
+	tx.markObsolete(old)
 	delete(tx.entries, norm)
 	return nil
 }
@@ -101,7 +110,8 @@ func (tx *Tx) RemoveMany(paths []string) (int, error) {
 		if err != nil {
 			return removed, ErrPathInvalid
 		}
-		if _, ok := tx.entries[norm]; ok {
+		if old, ok := tx.entries[norm]; ok {
+			tx.markObsolete(old)
 			delete(tx.entries, norm)
 			removed++
 		}
@@ -121,6 +131,7 @@ func (tx *Tx) RemovePrefix(prefix string) (int, error) {
 	fullPrefix := norm + "/"
 	for p := range tx.entries {
 		if p == norm || strings.HasPrefix(p, fullPrefix) {
+			tx.markObsolete(tx.entries[p])
 			delete(tx.entries, p)
 			removed++
 		}
@@ -148,6 +159,7 @@ func (tx *Tx) RemoveGlob(glob string) (int, error) {
 			return removed, ErrPathInvalid
 		}
 		if ok {
+			tx.markObsolete(tx.entries[p])
 			delete(tx.entries, p)
 			removed++
 		}
@@ -165,6 +177,7 @@ func (tx *Tx) RemoveWhere(predicate func(EntryInfo) bool) (int, error) {
 	removed := 0
 	for p, e := range tx.entries {
 		if predicate(entryInfo(e)) {
+			tx.markObsolete(e)
 			delete(tx.entries, p)
 			removed++
 		}
@@ -202,6 +215,10 @@ func (tx *Tx) Commit() error {
 	tx.c.mu.RLock()
 	h := tx.c.header
 	tx.c.mu.RUnlock()
+	deadBytes, churnOps := readCompactionStatsFromHeader(h)
+	deadBytes = saturatingAddUint64(deadBytes, tx.deadBytes)
+	churnOps = saturatingAddUint64(churnOps, tx.churnOps)
+	writeCompactionStatsToHeader(&h, deadBytes, churnOps)
 	h.DirOffset = dirOffset
 	h.DirSize = uint64(len(dirBlob))
 	h.DirCRC32 = crc
@@ -289,6 +306,19 @@ func (tx *Tx) Rollback() {
 func (tx *Tx) release() {
 	tx.closed = true
 	tx.c.txMu.Unlock()
+}
+
+func (tx *Tx) markObsolete(e format.EntryV1) {
+	tx.deadBytes = saturatingAddUint64(tx.deadBytes, entryStoredBytes(e))
+	tx.churnOps = saturatingAddUint64(tx.churnOps, 1)
+}
+
+func entryStoredBytes(e format.EntryV1) uint64 {
+	var total uint64
+	for _, ch := range e.Chunks {
+		total = saturatingAddUint64(total, uint64(ch.CompSize)+16)
+	}
+	return total
 }
 
 func (tx *Tx) writeEntry(path string, r io.Reader, meta []byte, wopts *WriteOptions) (format.EntryV1, error) {

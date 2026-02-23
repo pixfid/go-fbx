@@ -7,6 +7,9 @@ This implementation follows `FBX_RFC_BinarySpec_GoDoc_v1.md`.
 - Reserved fixed backup header slot at offset `128` (`HeaderSize`).
 - Append-only chunk records (`CHK1`) with codec/raw/CRC metadata.
 - Directory blob (`DIR1`) appended on commit and referenced by header (`DirOffset`, `DirSize`, `DirCRC32`).
+- Compaction hints in header reserved bytes:
+  - `reserved[8:16]` (`u64 LE`) = `dead_bytes` (estimated obsolete chunk bytes).
+  - `reserved[16:24]` (`u64 LE`) = `churn_ops` (count of replace/remove-like operations).
 
 Commits never rewrite existing chunk payloads. The latest header points to the newest directory snapshot.
 

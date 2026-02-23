@@ -72,7 +72,7 @@ Flags:
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
 
 Skip optimization:
-- For in-place `pack`, if all chunks already match requested `--codec` and `--level` (and no `--chunk-text/--chunk-bin` overrides), CLI prints `skip` and does not rewrite file.
+- For in-place `pack`, if all chunks already match requested `--codec` and `--level`, no `--chunk-text/--chunk-bin` overrides are set, and `dead_bytes==0`, CLI prints `skip` and does not rewrite file.
 
 ## `pack-many`
 Syntax:
@@ -99,7 +99,7 @@ Flags:
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound per file. | Bound decompression/chunk processing. |
 
 Skip optimization:
-- For each file, when codec/level already match and no chunk-size overrides are set, worker prints `SKIP` and does not repack that file.
+- For each file, when codec/level already match, no chunk-size overrides are set, and `dead_bytes==0`, worker prints `SKIP` and does not repack that file.
 
 Examples:
 ```bash
@@ -217,6 +217,9 @@ What it reports:
 - Level summary: single level (`0`, `3`, ...) or `mixed(...)`.
 - Per-codec chunk counters.
 - Per-level chunk counters (`chunks_level_<n>`).
+- `dead_bytes`: estimated obsolete bytes left after replacements/removals.
+- `churn_ops`: number of replace/remove-like operations that created obsolete bytes.
+- `file_size`: current container size in bytes.
 
 ## `set-meta`
 Syntax:

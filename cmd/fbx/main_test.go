@@ -289,6 +289,15 @@ func TestRunInfoAndInspectCodecs(t *testing.T) {
 	if obj["level"] == "" {
 		t.Fatalf("json output must contain level, got: %+v", obj)
 	}
+	if _, ok := obj["dead_bytes"]; !ok {
+		t.Fatalf("json output must contain dead_bytes, got: %+v", obj)
+	}
+	if _, ok := obj["churn_ops"]; !ok {
+		t.Fatalf("json output must contain churn_ops, got: %+v", obj)
+	}
+	if _, ok := obj["file_size"]; !ok {
+		t.Fatalf("json output must contain file_size, got: %+v", obj)
+	}
 }
 
 func TestRunPackMany(t *testing.T) {
@@ -366,6 +375,48 @@ func TestRunPackManySkipsIfAlreadyPacked(t *testing.T) {
 	})
 	if !strings.Contains(out, "SKIP") {
 		t.Fatalf("expected SKIP output, got: %s", out)
+	}
+}
+
+func TestRunPackDoesNotSkipWhenDeadDataPresent(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "dead-data.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader(bytes.Repeat([]byte("text-"), 256)), nil, &fbx.WriteOptions{Codec: fbx.CodecStore, Level: 0}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	c, err = fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := c.Remove("book.fb2"); err != nil {
+		_ = c.Close()
+		t.Fatalf("remove: %v", err)
+	}
+	_ = c.Close()
+
+	errOut := captureStderr(t, func() {
+		if code := runPack([]string{"--codec", "store", "--level", "0", "--progress=false", containerPath}); code != 0 {
+			t.Fatalf("runPack exit code: %d", code)
+		}
+	})
+	if strings.Contains(strings.ToLower(errOut), "skip") {
+		t.Fatalf("expected no skip when dead data is present, got: %s", errOut)
+	}
+
+	errOut = captureStderr(t, func() {
+		if code := runPack([]string{"--codec", "store", "--level", "0", "--progress=false", containerPath}); code != 0 {
+			t.Fatalf("runPack second exit code: %d", code)
+		}
+	})
+	if !strings.Contains(strings.ToLower(errOut), "skip") {
+		t.Fatalf("expected skip after dead data is compacted, got: %s", errOut)
 	}
 }
 
