@@ -71,7 +71,7 @@ Usage:
   fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
   fbx pack-many [--jobs n] [--glob pattern] [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--max-entry-size bytes] [--max-chunk-size bytes] <input1.fbx> [input2.fbx ...]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
-  fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
+  fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx rm [--prefix p] [--glob g] [--contains s] [--min-size n] [--max-size n] <container.fbx> [entry ...]
   fbx find [--prefix p] [--glob g] [--contains s] <container.fbx>
@@ -827,6 +827,7 @@ func runAddLike(isUpsert bool, args []string) int {
 	as := fs.String("as", "", "entry path inside FBX")
 	metaJSON := fs.String("meta-json", "", "metadata JSON string")
 	metaFile := fs.String("meta-file", "", "metadata JSON file")
+	keepMeta := fs.Bool("keep-meta", true, "for upsert: preserve existing metadata when replacing and --meta-* is not provided")
 	codecStr := fs.String("codec", "store", "chunk codec: store|zstd|lz4")
 	level := fs.Int("level", 0, "codec compression level")
 	chunkSize := fs.Int("chunk-size", 0, "chunk size in bytes")
@@ -882,6 +883,15 @@ func runAddLike(isUpsert bool, args []string) int {
 	}
 	entryPath = strings.ReplaceAll(entryPath, "\\", "/")
 	entryPath = strings.TrimLeft(entryPath, "/")
+
+	if isUpsert && len(meta) == 0 && *keepMeta {
+		if info, err := c.Stat(entryPath); err == nil {
+			meta = info.Meta
+		} else if err != fbx.ErrNotFound {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
 
 	wopts := &fbx.WriteOptions{
 		Codec:     codec,

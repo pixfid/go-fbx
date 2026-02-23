@@ -156,6 +156,40 @@ func TestRunReplaceAndSetMetaAndStat(t *testing.T) {
 	}
 }
 
+func TestRunUpsertKeepsMetaByDefault(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "c.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("old")), []byte(`{"v":1}`), nil); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	src := filepath.Join(dir, "new.fb2")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if code := runUpsert([]string{"--as", "books/a.fb2", containerPath, src}); code != 0 {
+		t.Fatalf("runUpsert exit code: %d", code)
+	}
+
+	c2, err := fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open after upsert: %v", err)
+	}
+	defer c2.Close()
+	info, err := c2.Stat("books/a.fb2")
+	if err != nil {
+		t.Fatalf("stat after upsert: %v", err)
+	}
+	if string(info.Meta) != `{"v":1}` {
+		t.Fatalf("meta should be preserved by default, got: %s", string(info.Meta))
+	}
+}
+
 func TestRunRmWithWhereFilters(t *testing.T) {
 	dir := t.TempDir()
 	containerPath := filepath.Join(dir, "c.fbx")

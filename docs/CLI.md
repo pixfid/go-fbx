@@ -127,6 +127,7 @@ Shared flags (`add`/`upsert`/`replace`):
 | `--as <entry/path>` | source basename | Entry path inside FBX. | Place file exactly where needed. |
 | `--meta-json <json>` | empty | Inline metadata JSON. | Quick metadata injection from CLI. |
 | `--meta-file <file.json>` | empty | Metadata JSON from file. | Reuse structured metadata payload. |
+| `--keep-meta` | `true` | For `upsert`: if entry exists and no `--meta-*` provided, preserve existing metadata. | Update body without dropping metadata. |
 | `--codec store\|zstd\|lz4` | `store` | Codec for this write. | Per-entry compression control. |
 | `--level <n>` | `0` | Compression level. | Tune zstd/lz4 quality vs speed. |
 | `--chunk-size <bytes>` | `0` | Force chunk size for this entry. | Override text/binary defaults. |
