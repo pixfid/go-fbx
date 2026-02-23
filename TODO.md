@@ -8,9 +8,10 @@
   - статус: выполнено, добавлены `BenchmarkPackSmall/Medium/Large` в `tests/bench_test.go`
   - baseline (2026-02-23): `PackSmall ~39.1ms`, `PackMedium ~94.0ms`, `PackLarge ~177.8ms`
 
-- [ ] 2. Пуллинг ZSTD encoder/decoder
+- [x] 2. Пуллинг ZSTD encoder/decoder
   - убрать `NewWriter/NewReader` на каждый чанк
-  - внедрить `sync.Pool` и переиспользование объектов
+  - внедрить переиспользование encoder/decoder через кэш/пулы
+  - статус: выполнено через кэш-пулы encoder/decoder с бакетизацией лимитов decoder
 
 - [ ] 3. Снижение аллокаций в chunk pipeline
   - пулы буферов для записи чанков
