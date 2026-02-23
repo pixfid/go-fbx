@@ -400,6 +400,52 @@ func TestRunPackMany(t *testing.T) {
 	}
 }
 
+func TestRunPackSkipsIfAlreadyPacked(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "skip.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader(bytes.Repeat([]byte("text-"), 256)), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	errOut := captureStderr(t, func() {
+		if code := runPack([]string{"--codec", "zstd", "--level", "3", "--progress=false", containerPath}); code != 0 {
+			t.Fatalf("runPack exit code: %d", code)
+		}
+	})
+	if !strings.Contains(errOut, "skip") {
+		t.Fatalf("expected skip message, got: %s", errOut)
+	}
+}
+
+func TestRunPackManySkipsIfAlreadyPacked(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "skip-many.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader(bytes.Repeat([]byte("text-"), 256)), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	out := captureStdout(t, func() {
+		if code := runPackMany([]string{"--jobs", "1", "--codec", "zstd", "--level", "3", containerPath}); code != 0 {
+			t.Fatalf("runPackMany exit code: %d", code)
+		}
+	})
+	if !strings.Contains(out, "SKIP") {
+		t.Fatalf("expected SKIP output, got: %s", out)
+	}
+}
+
 func TestBrowserModelNavigationAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	containerPath := filepath.Join(dir, "ui.fbx")
@@ -491,6 +537,24 @@ func captureStdout(t *testing.T, fn func()) string {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatalf("read captured output: %v", err)
+	}
+	return string(b)
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+	fn()
+	_ = w.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured error output: %v", err)
 	}
 	return string(b)
 }

@@ -93,6 +93,9 @@ Flags:
 | `--max-entry-size <bytes>` | `0` | Safety limit during read/write. | Harden repack for untrusted files. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
 
+Skip optimization:
+- For in-place `pack`, if all chunks already match requested `--codec` and `--level` (and no `--chunk-text/--chunk-bin` overrides), CLI prints `skip` and does not rewrite file.
+
 ## `pack-many`
 Syntax:
 ```bash
@@ -116,6 +119,9 @@ Flags:
 | `--fast` | `false` | Unsafe fast profile per file (`StrictVerify=false`, `SyncOnCommit=false`). | Maximum throughput on trusted input sets. |
 | `--max-entry-size <bytes>` | `0` | Safety entry bound per file. | Bound resource usage in bulk mode. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound per file. | Bound decompression/chunk processing. |
+
+Skip optimization:
+- For each file, when codec/level already match and no chunk-size overrides are set, worker prints `SKIP` and does not repack that file.
 
 Examples:
 ```bash

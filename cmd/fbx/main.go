@@ -1628,6 +1628,17 @@ func runPack(args []string) int {
 		return 2
 	}
 	popts.Codec = codec
+	if output == input && *chunkText == 0 && *chunkBin == 0 {
+		matched, err := containerMatchesPackParams(input, popts.Codec, popts.Level)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if matched {
+			fmt.Fprintf(os.Stderr, "pack: skip, already codec=%s level=%d\n", codecName(popts.Codec), popts.Level)
+			return 0
+		}
+	}
 	if err := fbx.Pack(input, output, popts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -1704,8 +1715,9 @@ func runPackMany(args []string) int {
 	}
 
 	type packManyResult struct {
-		path string
-		err  error
+		path    string
+		err     error
+		skipped bool
 	}
 	workCh := make(chan string, len(inputs))
 	resCh := make(chan packManyResult, len(inputs))
@@ -1720,6 +1732,17 @@ func runPackMany(args []string) int {
 		go func() {
 			defer wg.Done()
 			for p := range workCh {
+				if popts.ChunkText == 0 && popts.ChunkBin == 0 {
+					matched, err := containerMatchesPackParams(p, popts.Codec, popts.Level)
+					if err != nil {
+						resCh <- packManyResult{path: p, err: err}
+						continue
+					}
+					if matched {
+						resCh <- packManyResult{path: p, skipped: true}
+						continue
+					}
+				}
 				opts := popts
 				err := fbx.Pack(p, p, &opts)
 				resCh <- packManyResult{path: p, err: err}
@@ -1735,6 +1758,10 @@ func runPackMany(args []string) int {
 	failed := 0
 	for res := range resCh {
 		done++
+		if res.skipped {
+			fmt.Printf("[%d/%d] SKIP %s (already codec=%s level=%d)\n", done, len(inputs), res.path, codecName(popts.Codec), popts.Level)
+			continue
+		}
 		if res.err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "[%d/%d] FAIL %s: %v\n", done, len(inputs), res.path, res.err)
@@ -1767,6 +1794,35 @@ func uniqueSortedStrings(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func codecName(c fbx.Codec) string {
+	switch c {
+	case fbx.CodecStore:
+		return "store"
+	case fbx.CodecZstd:
+		return "zstd"
+	case fbx.CodecLZ4:
+		return "lz4"
+	default:
+		return fmt.Sprintf("unknown_%d", c)
+	}
+}
+
+func containerMatchesPackParams(containerPath string, codec fbx.Codec, level int) (bool, error) {
+	report, err := inspectContainerCodecs(containerPath)
+	if err != nil {
+		return false, err
+	}
+	total := report.ChunksTotal
+	codecKey := codecName(codec)
+	if report.ChunkCounts[codecKey] != total {
+		return false, nil
+	}
+	if report.LevelCounts[strconv.Itoa(level)] != total {
+		return false, nil
+	}
+	return true, nil
 }
 
 func runAdd(args []string) int {
