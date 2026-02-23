@@ -2,9 +2,11 @@
 
 Цель: ускорить библиотеку `go-fbx` без потери совместимости формата.
 
-- [ ] 1. Базовая метрика производительности
+- [x] 1. Базовая метрика производительности
   - зафиксировать baseline: `go test -bench . ./tests -benchmem`
   - добавить/уточнить bench-сценарии для `pack` (малый/средний/большой контейнер)
+  - статус: выполнено, добавлены `BenchmarkPackSmall/Medium/Large` в `tests/bench_test.go`
+  - baseline (2026-02-23): `PackSmall ~39.1ms`, `PackMedium ~94.0ms`, `PackLarge ~177.8ms`
 
 - [ ] 2. Пуллинг ZSTD encoder/decoder
   - убрать `NewWriter/NewReader` на каждый чанк

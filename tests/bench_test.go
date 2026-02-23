@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -65,6 +66,61 @@ func BenchmarkContainerAddExtract1MiB(b *testing.B) {
 		}
 		if out.Len() != len(payload) {
 			b.Fatalf("size mismatch: got=%d want=%d", out.Len(), len(payload))
+		}
+	}
+}
+
+func BenchmarkPackSmall(b *testing.B) {
+	benchmarkPackContainer(b, 32, 8<<10)
+}
+
+func BenchmarkPackMedium(b *testing.B) {
+	benchmarkPackContainer(b, 128, 32<<10)
+}
+
+func BenchmarkPackLarge(b *testing.B) {
+	benchmarkPackContainer(b, 256, 64<<10)
+}
+
+func benchmarkPackContainer(b *testing.B, entryCount int, payloadSize int) {
+	dir := b.TempDir()
+	srcPath := filepath.Join(dir, "src.fbx")
+	dstPath := filepath.Join(dir, "dst.fbx")
+
+	payload := make([]byte, payloadSize)
+	seed := []byte("fb2-benchmark-line-")
+	for i := 0; i < payloadSize; i++ {
+		payload[i] = seed[i%len(seed)]
+	}
+
+	c, err := fbx.Create(srcPath, &fbx.Options{MaxWorkers: 4})
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < entryCount; i++ {
+		entry := fmt.Sprintf("books/%06d.fb2", i)
+		if err := c.Add(entry, bytes.NewReader(payload), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+			_ = c.Close()
+			b.Fatal(err)
+		}
+	}
+	if err := c.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	opts := &fbx.PackOptions{
+		Codec:    fbx.CodecZstd,
+		Level:    3,
+		Workers:  4,
+		VerifyIn: false,
+	}
+	totalBytes := int64(entryCount * payloadSize)
+	b.ReportAllocs()
+	b.SetBytes(totalBytes)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fbx.Pack(srcPath, dstPath, opts); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
