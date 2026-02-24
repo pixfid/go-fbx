@@ -47,4 +47,3 @@ _ = c.Close()
 - `docs/API.md` — публичный Go API и семантика опций.
 - `docs/FORMAT_AND_RECOVERY.md` — модель формата на диске, journal и recovery.
 - `docs/DEVELOPMENT.md` — тесты, векторы, бенчмарки и workflow разработки.
-- `AGENTS.md` — правила для контрибьюторов (стиль кода и PR-гигиена).
