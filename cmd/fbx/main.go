@@ -47,6 +47,8 @@ func main() {
 		os.Exit(runStat(os.Args[2:]))
 	case "set-meta":
 		os.Exit(runSetMeta(os.Args[2:]))
+	case "set-meta-many":
+		os.Exit(runSetMetaMany(os.Args[2:]))
 	case "info":
 		os.Exit(runInfo(os.Args[2:]))
 	case "replace-text":
@@ -69,8 +71,8 @@ func usage() {
 
 Usage:
   fbx convert-zip [--meta auto|none] [--meta-file file.json] [--prefix p] [--codec store|zstd|lz4] [--level n] [--progress] [--overwrite] [--max-entry-size bytes] [--max-chunk-size bytes] <input.zip> <output.fbx>
-  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
-  fbx pack-many [--jobs n] [--glob pattern] [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--max-entry-size bytes] [--max-chunk-size bytes] <input1.fbx> [input2.fbx ...]
+  fbx pack [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--clear-meta] [--progress] [--max-entry-size bytes] [--max-chunk-size bytes] <input.fbx> [-o output.fbx]
+  fbx pack-many [--jobs n] [--glob pattern] [--codec store|zstd|lz4] [--level n] [--chunk-text n] [--chunk-bin n] [--workers n] [--verify-in] [--fast] [--clear-meta] [--max-entry-size bytes] [--max-chunk-size bytes] <input1.fbx> [input2.fbx ...]
   fbx add [--as entry/path] [--meta-json json] [--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx upsert [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
   fbx replace [--as entry/path] [--meta-json json] [--meta-file file.json] [--keep-meta] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <source-file>
@@ -79,6 +81,7 @@ Usage:
   fbx stat [--json] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
   fbx info [--json] <container.fbx>
   fbx set-meta [--meta-json json|--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
+  fbx set-meta-many --meta-file file.json [--ignore-missing] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx replace-text --find old --replace new [--prefix p] [--glob g] [--dry-run] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx list <container.fbx>
   fbx extract [-o output] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
@@ -505,6 +508,7 @@ func runPack(args []string) int {
 	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
 	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
 	fastUnsafe := fs.Bool("fast", false, "faster unsafe mode: disable CRC read checks and fsync on output")
+	clearMeta := fs.Bool("clear-meta", false, "drop metadata for all entries during repack")
 	showProgress := fs.Bool("progress", true, "show pack progress")
 	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
 	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
@@ -528,6 +532,7 @@ func runPack(args []string) int {
 		Workers:      *workers,
 		VerifyIn:     *verifyIn,
 		FastUnsafe:   *fastUnsafe,
+		ClearMeta:    *clearMeta,
 		MaxEntrySize: *maxEntrySize,
 	}
 	if *showProgress {
@@ -545,7 +550,7 @@ func runPack(args []string) int {
 		return 2
 	}
 	popts.Codec = codec
-	if output == input && *chunkText == 0 && *chunkBin == 0 {
+	if output == input && *chunkText == 0 && *chunkBin == 0 && !*clearMeta {
 		matched, err := containerMatchesPackParams(input, popts.Codec, popts.Level)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -574,6 +579,7 @@ func runPackMany(args []string) int {
 	workers := fs.Int("workers", 0, "parallel workers for chunk compression")
 	verifyIn := fs.Bool("verify-in", true, "verify input container before pack")
 	fastUnsafe := fs.Bool("fast", false, "faster unsafe mode: disable CRC read checks and fsync on output")
+	clearMeta := fs.Bool("clear-meta", false, "drop metadata for all entries during repack")
 	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
 	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
 	if err := fs.Parse(args); err != nil {
@@ -600,6 +606,7 @@ func runPackMany(args []string) int {
 		Workers:      *workers,
 		VerifyIn:     *verifyIn,
 		FastUnsafe:   *fastUnsafe,
+		ClearMeta:    *clearMeta,
 		MaxEntrySize: *maxEntrySize,
 		MaxChunkSize: uint32(*maxChunkSize),
 	}
@@ -649,7 +656,7 @@ func runPackMany(args []string) int {
 		go func() {
 			defer wg.Done()
 			for p := range workCh {
-				if popts.ChunkText == 0 && popts.ChunkBin == 0 {
+				if popts.ChunkText == 0 && popts.ChunkBin == 0 && !popts.ClearMeta {
 					matched, err := containerMatchesPackParams(p, popts.Codec, popts.Level)
 					if err != nil {
 						resCh <- packManyResult{path: p, err: err}
@@ -1194,6 +1201,53 @@ func runSetMeta(args []string) int {
 	return 0
 }
 
+func runSetMetaMany(args []string) int {
+	fs := flag.NewFlagSet("set-meta-many", flag.ContinueOnError)
+	metaFile := fs.String("meta-file", "", "JSON map path->metadata JSON")
+	ignoreMissing := fs.Bool("ignore-missing", false, "skip metadata records for missing entries")
+	maxEntrySize := fs.Uint64("max-entry-size", 0, "maximum entry size in bytes (0 = unlimited)")
+	maxChunkSize := fs.Uint64("max-chunk-size", 0, "maximum chunk size in bytes (0 = unlimited)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "set-meta-many requires <container.fbx>")
+		return 2
+	}
+	if *metaFile == "" {
+		fmt.Fprintln(os.Stderr, "set-meta-many requires --meta-file")
+		return 2
+	}
+	metaByPath, err := loadMetaMap(*metaFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if len(metaByPath) == 0 {
+		fmt.Fprintln(os.Stderr, "--meta-file must contain at least one entry")
+		return 2
+	}
+	copts, err := buildLimitOptions(*maxEntrySize, *maxChunkSize)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	c, err := fbx.Open(fs.Arg(0), copts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer c.Close()
+
+	updated, missing, err := c.SetMetaMany(metaByPath, *ignoreMissing)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Printf("entries_updated=%d missing=%d\n", updated, missing)
+	return 0
+}
+
 func runReplaceText(args []string) int {
 	fs := flag.NewFlagSet("replace-text", flag.ContinueOnError)
 	find := fs.String("find", "", "text to find")
@@ -1372,6 +1426,25 @@ func loadMeta(metaJSON, metaFile string) ([]byte, error) {
 		return b, nil
 	}
 	return nil, nil
+}
+
+func loadMetaMap(metaFile string) (map[string][]byte, error) {
+	b, err := os.ReadFile(metaFile)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("--meta-file must contain a JSON object map path->metadata")
+	}
+	out := make(map[string][]byte, len(raw))
+	for p, meta := range raw {
+		if len(meta) == 0 || !json.Valid(meta) {
+			return nil, fmt.Errorf("--meta-file metadata for %q must be valid JSON", p)
+		}
+		out[p] = append([]byte(nil), meta...)
+	}
+	return out, nil
 }
 
 func runExtract(args []string) int {

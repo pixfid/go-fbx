@@ -78,6 +78,7 @@ type PackOptions struct {
 	Workers      int
 	VerifyIn     bool
 	FastUnsafe   bool
+	ClearMeta    bool
 	MaxEntrySize uint64
 	MaxChunkSize uint32
 	Progress     func(PackProgress)

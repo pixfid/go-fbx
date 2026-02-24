@@ -140,6 +140,10 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 			tx.Rollback()
 			return err
 		}
+		meta := e.Meta
+		if opts.ClearMeta {
+			meta = nil
+		}
 		wopts := &WriteOptions{
 			Codec:     opts.Codec,
 			Level:     opts.Level,
@@ -148,7 +152,7 @@ func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 			Mode:      e.Mode,
 			Flags:     e.Flags,
 		}
-		err = tx.Upsert(e.Path, r, e.Meta, wopts)
+		err = tx.Upsert(e.Path, r, meta, wopts)
 		closeErr := r.Close()
 		if err != nil {
 			tx.Rollback()

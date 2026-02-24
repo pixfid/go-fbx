@@ -78,6 +78,29 @@ func TestLoadMeta(t *testing.T) {
 	}
 }
 
+func TestLoadMetaMap(t *testing.T) {
+	dir := t.TempDir()
+	okPath := filepath.Join(dir, "meta-map.json")
+	if err := os.WriteFile(okPath, []byte(`{"books/a.fb2":{"id":1},"books/b.fb2":[1,2,3]}`), 0o644); err != nil {
+		t.Fatalf("write meta map: %v", err)
+	}
+	m, err := loadMetaMap(okPath)
+	if err != nil {
+		t.Fatalf("loadMetaMap: %v", err)
+	}
+	if len(m) != 2 {
+		t.Fatalf("unexpected size: %d", len(m))
+	}
+
+	badPath := filepath.Join(dir, "meta-map-bad.json")
+	if err := os.WriteFile(badPath, []byte(`[]`), 0o644); err != nil {
+		t.Fatalf("write bad map: %v", err)
+	}
+	if _, err := loadMetaMap(badPath); err == nil {
+		t.Fatalf("expected error for non-object meta map")
+	}
+}
+
 func TestZipProgressPrinterRender(t *testing.T) {
 	p := &zipProgressPrinter{}
 	p.render(3, 10, false)
@@ -153,6 +176,154 @@ func TestRunReplaceAndSetMetaAndStat(t *testing.T) {
 	}
 	if string(info.Meta) != `{"v":2}` {
 		t.Fatalf("unexpected meta after set-meta: %s", string(info.Meta))
+	}
+}
+
+func TestRunSetMetaMany(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "meta-many.fbx")
+	bodyA := bytes.Repeat([]byte("a-"), 64)
+	bodyB := bytes.Repeat([]byte("b-"), 64)
+
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader(bodyA), []byte(`{"v":1}`), &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add a: %v", err)
+	}
+	if err := c.Add("books/b.fb2", bytes.NewReader(bodyB), []byte(`{"v":1}`), &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add b: %v", err)
+	}
+	_ = c.Close()
+
+	metaMapPath := filepath.Join(dir, "meta-map.json")
+	if err := os.WriteFile(metaMapPath, []byte(`{"books/a.fb2":{"v":2},"books/b.fb2":{"v":3}}`), 0o644); err != nil {
+		t.Fatalf("write meta map: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if code := runSetMetaMany([]string{"--meta-file", metaMapPath, containerPath}); code != 0 {
+			t.Fatalf("runSetMetaMany exit code: %d", code)
+		}
+	})
+	if !strings.Contains(out, "entries_updated=2") {
+		t.Fatalf("expected updated output, got: %s", out)
+	}
+	rep, err := inspectContainerCodecs(containerPath)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	if rep.DeadBytes != 0 || rep.ChurnOps != 0 {
+		t.Fatalf("metadata-only update must not create dead bytes/churn, got dead=%d churn=%d", rep.DeadBytes, rep.ChurnOps)
+	}
+
+	c, err = fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+	infoA, err := c.Stat("books/a.fb2")
+	if err != nil {
+		t.Fatalf("stat a: %v", err)
+	}
+	infoB, err := c.Stat("books/b.fb2")
+	if err != nil {
+		t.Fatalf("stat b: %v", err)
+	}
+	if string(infoA.Meta) != `{"v":2}` || string(infoB.Meta) != `{"v":3}` {
+		t.Fatalf("unexpected metadata after set-meta-many: a=%s b=%s", string(infoA.Meta), string(infoB.Meta))
+	}
+	var gotA, gotB bytes.Buffer
+	if err := c.Extract("books/a.fb2", &gotA); err != nil {
+		t.Fatalf("extract a: %v", err)
+	}
+	if err := c.Extract("books/b.fb2", &gotB); err != nil {
+		t.Fatalf("extract b: %v", err)
+	}
+	if !bytes.Equal(gotA.Bytes(), bodyA) || !bytes.Equal(gotB.Bytes(), bodyB) {
+		t.Fatalf("payload changed after metadata-only update")
+	}
+}
+
+func TestRunSetMetaManyIgnoreMissing(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "meta-many-missing.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("a")), []byte(`{"v":1}`), nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	metaMapPath := filepath.Join(dir, "meta-map.json")
+	if err := os.WriteFile(metaMapPath, []byte(`{"books/a.fb2":{"v":2},"books/missing.fb2":{"v":0}}`), 0o644); err != nil {
+		t.Fatalf("write meta map: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if code := runSetMetaMany([]string{"--meta-file", metaMapPath, "--ignore-missing", containerPath}); code != 0 {
+			t.Fatalf("runSetMetaMany exit code: %d", code)
+		}
+	})
+	if !strings.Contains(out, "entries_updated=1") || !strings.Contains(out, "missing=1") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+
+	c, err = fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+	info, err := c.Stat("books/a.fb2")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if string(info.Meta) != `{"v":2}` {
+		t.Fatalf("unexpected metadata: %s", string(info.Meta))
+	}
+}
+
+func TestRunSetMetaManyMissingFailsWithoutIgnore(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "meta-many-missing-fail.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("a")), []byte(`{"v":1}`), nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	metaMapPath := filepath.Join(dir, "meta-map.json")
+	if err := os.WriteFile(metaMapPath, []byte(`{"books/a.fb2":{"v":2},"books/missing.fb2":{"v":0}}`), 0o644); err != nil {
+		t.Fatalf("write meta map: %v", err)
+	}
+	errOut := captureStderr(t, func() {
+		if code := runSetMetaMany([]string{"--meta-file", metaMapPath, containerPath}); code != 1 {
+			t.Fatalf("runSetMetaMany exit code: %d", code)
+		}
+	})
+	if errOut == "" {
+		t.Fatalf("expected error output")
+	}
+
+	c, err = fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+	info, err := c.Stat("books/a.fb2")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if string(info.Meta) != `{"v":1}` {
+		t.Fatalf("metadata must remain unchanged on failed batch, got: %s", string(info.Meta))
 	}
 }
 
@@ -375,6 +546,87 @@ func TestRunPackManySkipsIfAlreadyPacked(t *testing.T) {
 	})
 	if !strings.Contains(out, "SKIP") {
 		t.Fatalf("expected SKIP output, got: %s", out)
+	}
+}
+
+func TestRunPackClearMeta(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "clear-meta.fbx")
+	body := bytes.Repeat([]byte("text-"), 128)
+	meta := []byte(`{"tag":"keep?"}`)
+
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader(body), meta, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	errOut := captureStderr(t, func() {
+		if code := runPack([]string{"--codec", "zstd", "--level", "3", "--clear-meta", "--progress=false", containerPath}); code != 0 {
+			t.Fatalf("runPack exit code: %d", code)
+		}
+	})
+	if strings.Contains(strings.ToLower(errOut), "skip") {
+		t.Fatalf("expected no skip when clear-meta is set, got: %s", errOut)
+	}
+
+	co, err := fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open packed: %v", err)
+	}
+	defer co.Close()
+	info, err := co.Stat("book.fb2")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if len(info.Meta) != 0 {
+		t.Fatalf("expected metadata to be cleared, got %q", string(info.Meta))
+	}
+}
+
+func TestRunPackManyClearMeta(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "clear-meta-many.fbx")
+	body := bytes.Repeat([]byte("text-"), 128)
+	meta := []byte(`{"tag":"batch"}`)
+
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader(body), meta, &fbx.WriteOptions{Codec: fbx.CodecZstd, Level: 3}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	out := captureStdout(t, func() {
+		if code := runPackMany([]string{"--jobs", "1", "--codec", "zstd", "--level", "3", "--clear-meta", containerPath}); code != 0 {
+			t.Fatalf("runPackMany exit code: %d", code)
+		}
+	})
+	if strings.Contains(out, "SKIP") {
+		t.Fatalf("expected no SKIP when clear-meta is set, got: %s", out)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Fatalf("expected OK output, got: %s", out)
+	}
+
+	co, err := fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open packed: %v", err)
+	}
+	defer co.Close()
+	info, err := co.Stat("book.fb2")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if len(info.Meta) != 0 {
+		t.Fatalf("expected metadata to be cleared, got %q", string(info.Meta))
 	}
 }
 

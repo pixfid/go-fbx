@@ -10,6 +10,7 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 - `rm` / `find` — filter/remove by path and size predicates.
 - `stat` / `info` / `list` — inspect container and entries.
 - `set-meta` — rewrite one entry with new metadata.
+- `set-meta-many` — metadata-only batch update in one commit.
 - `replace-text` — bulk byte-string replacement in matching entries.
 - `extract` — stream one entry out.
 - `verify` — integrity validation.
@@ -67,12 +68,13 @@ Flags:
 | `--workers <n>` | `0` | Parallel compression workers (`0` = library default). | Speed up heavy recompression. |
 | `--verify-in` | `true` | Verify input container before repack. | Catch corruption early. |
 | `--fast` | `false` | Unsafe speed profile: disable CRC read checks during repack and disable output fsync on commit. | Max throughput for trusted data and disposable runs. |
+| `--clear-meta` | `false` | Drop metadata for all entries while rewriting. | Minimize directory size and remove stale metadata. |
 | `--progress` | `true` | One-line repack progress bar. | Visibility for long repacks. |
 | `--max-entry-size <bytes>` | `0` | Safety limit during read/write. | Harden repack for untrusted files. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound. | Avoid processing oversized chunks. |
 
 Skip optimization:
-- For in-place `pack`, if all chunks already match requested `--codec` and `--level`, no `--chunk-text/--chunk-bin` overrides are set, and `dead_bytes==0`, CLI prints `skip` and does not rewrite file.
+- For in-place `pack`, if all chunks already match requested `--codec` and `--level`, no `--chunk-text/--chunk-bin` overrides are set, `--clear-meta=false`, and `dead_bytes==0`, CLI prints `skip` and does not rewrite file.
 
 ## `pack-many`
 Syntax:
@@ -95,11 +97,12 @@ Flags:
 | `--workers <n>` | `0` | Per-file compression workers. | Tune per-job CPU usage. |
 | `--verify-in` | `true` | Verify each input before repack. | Early corruption detection in batch runs. |
 | `--fast` | `false` | Unsafe fast profile per file (`StrictVerify=false`, `SyncOnCommit=false`). | Maximum throughput on trusted input sets. |
+| `--clear-meta` | `false` | Drop metadata for all entries in each rewritten container. | Shrink directory footprints in bulk repacks. |
 | `--max-entry-size <bytes>` | `0` | Safety entry bound per file. | Bound resource usage in bulk mode. |
 | `--max-chunk-size <bytes>` | `0` | Safety chunk bound per file. | Bound decompression/chunk processing. |
 
 Skip optimization:
-- For each file, when codec/level already match, no chunk-size overrides are set, and `dead_bytes==0`, worker prints `SKIP` and does not repack that file.
+- For each file, when codec/level already match, no chunk-size overrides are set, `--clear-meta=false`, and `dead_bytes==0`, worker prints `SKIP` and does not repack that file.
 
 Examples:
 ```bash
@@ -240,6 +243,30 @@ Flags:
 | `--max-chunk-size <bytes>` | `0` | Open/write chunk safety bound. | Prevent oversized chunk processing. |
 
 Note: `set-meta` rewrites the entry (content is read and written back), not just an in-place metadata patch.
+
+## `set-meta-many`
+Syntax:
+```bash
+fbx set-meta-many [flags] <container.fbx>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--meta-file <file.json>` | required | JSON object map `entry/path -> metadata JSON value`. | Batch-apply metadata updates with one transaction commit. |
+| `--ignore-missing` | `false` | Skip map keys that are absent in container. | Reuse shared metadata maps across containers. |
+| `--max-entry-size <bytes>` | `0` | Open-time safety limit. | Defensive operation on unknown files. |
+| `--max-chunk-size <bytes>` | `0` | Open-time chunk safety bound. | Prevent oversized chunk processing. |
+
+Output: `entries_updated=<n> missing=<m>`.
+
+Important: `set-meta-many` updates directory metadata only and does not rewrite payload chunks.
+
+Example:
+```bash
+fbx set-meta-many --meta-file meta-map.json --ignore-missing books.fbx
+```
 
 ## `replace-text`
 Syntax:

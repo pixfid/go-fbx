@@ -36,6 +36,11 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
   - `VerifyAllChunks`
 - `Pack(inPath, outPath, opts)` пересобирает компактный контейнер.
 
+## Обновление только метаданных
+- `SetMeta(path, meta)` обновляет метаданные одной записи без перепаковки payload-чанков.
+- `SetMetaMany(metaByPath, ignoreMissing)` массово обновляет метаданные в одном commit (возвращает `updated`, `missing`).
+- Также доступны транзакционные варианты: `tx.SetMeta(...)`, `tx.SetMetaMany(...)`.
+
 ## Лимиты и безопасность
 - `Options.MaxEntrySize`: отклонение чтения/записи выше лимита размера записи.
 - `Options.MaxChunkSize`: отклонение oversized-чанков при чтении; ограничение размера чанков при записи.

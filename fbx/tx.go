@@ -185,6 +185,50 @@ func (tx *Tx) RemoveWhere(predicate func(EntryInfo) bool) (int, error) {
 	return removed, nil
 }
 
+// SetMeta updates entry metadata without rewriting entry payload chunks.
+func (tx *Tx) SetMeta(path string, meta []byte) error {
+	if tx.closed {
+		return io.ErrClosedPipe
+	}
+	norm, err := pathutil.Normalize(path)
+	if err != nil {
+		return ErrPathInvalid
+	}
+	e, ok := tx.entries[norm]
+	if !ok {
+		return ErrNotFound
+	}
+	e.Meta = append([]byte(nil), meta...)
+	tx.entries[norm] = e
+	return nil
+}
+
+// SetMetaMany updates metadata for many entries in one transaction.
+// When ignoreMissing is false, missing paths fail the operation.
+func (tx *Tx) SetMetaMany(metaByPath map[string][]byte, ignoreMissing bool) (updated int, missing int, err error) {
+	if tx.closed {
+		return 0, 0, io.ErrClosedPipe
+	}
+	for p, meta := range metaByPath {
+		norm, nerr := pathutil.Normalize(p)
+		if nerr != nil {
+			return updated, missing, ErrPathInvalid
+		}
+		e, ok := tx.entries[norm]
+		if !ok {
+			if ignoreMissing {
+				missing++
+				continue
+			}
+			return updated, missing, ErrNotFound
+		}
+		e.Meta = append([]byte(nil), meta...)
+		tx.entries[norm] = e
+		updated++
+	}
+	return updated, missing, nil
+}
+
 func (tx *Tx) Commit() error {
 	if tx.closed {
 		return io.ErrClosedPipe

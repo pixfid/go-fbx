@@ -120,6 +120,50 @@ func TestPackProgressCallback(t *testing.T) {
 	}
 }
 
+func TestPackClearMeta(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.fbx")
+	out := filepath.Join(dir, "out.fbx")
+	body := bytes.Repeat([]byte("meta-body-"), 64)
+	meta := []byte(`{"id":123,"source":"zip"}`)
+
+	c, err := Create(in, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a.fb2", bytes.NewReader(body), meta, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := Pack(in, out, &PackOptions{Codec: CodecStore, VerifyIn: true, ClearMeta: true}); err != nil {
+		t.Fatalf("pack clear-meta: %v", err)
+	}
+	co, err := Open(out, nil)
+	if err != nil {
+		t.Fatalf("open packed: %v", err)
+	}
+	defer co.Close()
+
+	info, err := co.Stat("a.fb2")
+	if err != nil {
+		t.Fatalf("stat packed entry: %v", err)
+	}
+	if len(info.Meta) != 0 {
+		t.Fatalf("expected empty metadata, got %q", string(info.Meta))
+	}
+	var got bytes.Buffer
+	if err := co.Extract("a.fb2", &got); err != nil {
+		t.Fatalf("extract packed: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), body) {
+		t.Fatalf("packed body mismatch")
+	}
+}
+
 func TestPackFastUnsafeBypassesChunkCRC(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.fbx")

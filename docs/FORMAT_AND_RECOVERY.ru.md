@@ -7,6 +7,9 @@
 - Зарезервированный фиксированный backup header по смещению `128` (`HeaderSize`).
 - Append-only chunk records (`CHK1`) с метаданными codec/raw/CRC.
 - Directory blob (`DIR1`) дописывается на `commit` и указывается в header (`DirOffset`, `DirSize`, `DirCRC32`).
+- Подсказки компактации в reserved-байтах заголовка:
+  - `reserved[8:16]` (`u64 LE`) = `dead_bytes` (оценка объема устаревших байтов чанков).
+  - `reserved[16:24]` (`u64 LE`) = `churn_ops` (число replace/remove-подобных операций).
 
 Commit никогда не переписывает существующие payload-чанков. Актуальный header всегда указывает на последний snapshot directory.
 
@@ -24,7 +27,8 @@ Commit никогда не переписывает существующие pay
 Если валидация primary header/directory не проходит:
 1. Попытка чтения fixed backup header.
 2. Сканирование хвоста файла (`JNL1`/`BKP1`) и выбор последнего валидного snapshot по timestamp.
-3. Перезапись восстановленного header в offset `0`.
+3. Сканирование файла на валидные snapshot'ы `DIR1 ... END1` и синтез header по самому новому валидному directory.
+4. Перезапись восстановленного header в offset `0`.
 
 Если все источники восстановления невалидны, `Open` возвращает `ErrInvalidFormat`.
 

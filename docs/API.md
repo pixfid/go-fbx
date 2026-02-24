@@ -36,6 +36,11 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
   - `VerifyAllChunks`
 - `Pack(inPath, outPath, opts)` rebuilds a compact container.
 
+## Metadata-Only Updates
+- `SetMeta(path, meta)` updates one entry metadata payload without rewriting entry chunks.
+- `SetMetaMany(metaByPath, ignoreMissing)` updates many entries in one commit (returns `updated`, `missing`).
+- Transaction form is also available: `tx.SetMeta(...)`, `tx.SetMetaMany(...)`.
+
 ## Limits and Safety
 - `Options.MaxEntrySize`: reject reads/writes above entry byte limit.
 - `Options.MaxChunkSize`: reject oversized chunks on read; cap chunk size on write.

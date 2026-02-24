@@ -61,24 +61,40 @@ func Open(path string, opts *Options) (*Container, error) {
 	}
 
 	recovered, recErr = recoverBestHeader(f)
-	if recErr != nil {
-		_ = f.Close()
+	if recErr == nil {
+		entries, err := readEntriesByHeader(f, recovered)
 		if err != nil {
+			_ = f.Close()
 			return nil, mapErr(err)
 		}
-		return nil, mapErr(recErr)
+		recoveredBuf, mErr := recovered.MarshalBinary()
+		if mErr == nil {
+			_, _ = f.WriteAt(recoveredBuf, 0)
+			_ = f.Sync()
+		}
+		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
 	}
-	entries, err := readEntriesByHeader(f, recovered)
+
+	recovered, recErr = recoverHeaderFromDirectoryScan(f)
+	if recErr == nil {
+		entries, err := readEntriesByHeader(f, recovered)
+		if err != nil {
+			_ = f.Close()
+			return nil, mapErr(err)
+		}
+		recoveredBuf, mErr := recovered.MarshalBinary()
+		if mErr == nil {
+			_, _ = f.WriteAt(recoveredBuf, 0)
+			_ = f.Sync()
+		}
+		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+	}
+
+	_ = f.Close()
 	if err != nil {
-		_ = f.Close()
 		return nil, mapErr(err)
 	}
-	recoveredBuf, mErr := recovered.MarshalBinary()
-	if mErr == nil {
-		_, _ = f.WriteAt(recoveredBuf, 0)
-		_ = f.Sync()
-	}
-	return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+	return nil, mapErr(recErr)
 }
 
 func Create(path string, opts *Options) (*Container, error) {
@@ -239,6 +255,38 @@ func (c *Container) Replace(path string, r io.Reader, meta []byte, wopts *WriteO
 		return err
 	}
 	return tx.Commit()
+}
+
+func (c *Container) SetMeta(path string, meta []byte) error {
+	tx, err := c.Begin()
+	if err != nil {
+		return err
+	}
+	if err := tx.SetMeta(path, meta); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (c *Container) SetMetaMany(metaByPath map[string][]byte, ignoreMissing bool) (updated int, missing int, err error) {
+	tx, err := c.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	updated, missing, err = tx.SetMetaMany(metaByPath, ignoreMissing)
+	if err != nil {
+		tx.Rollback()
+		return updated, missing, err
+	}
+	if updated == 0 {
+		tx.Rollback()
+		return 0, missing, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return updated, missing, err
+	}
+	return updated, missing, nil
 }
 
 func (c *Container) Remove(path string) error {

@@ -27,7 +27,8 @@ With `SyncOnCommit=true` (default), `fsync` is executed between critical stages.
 If primary header/directory validation fails:
 1. Try fixed backup header slot.
 2. Try scanning tail records (`JNL1`/`BKP1`) and pick latest valid by timestamp.
-3. Re-write recovered header to offset `0`.
+3. Scan file for valid `DIR1 ... END1` snapshots and synthesize a header from the newest valid directory.
+4. Re-write recovered header to offset `0`.
 
 If all recovery sources fail, `Open` returns `ErrInvalidFormat`.
 

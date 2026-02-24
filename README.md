@@ -12,8 +12,9 @@ It is designed for large FB2/FictionBook archives and supports streaming reads/w
 - ZIP -> FBX conversion with optional metadata and one-line progress redraw.
 - Verification modes: directory-only, sampled chunks, all chunks.
 - Mass operations: remove by prefix/glob/predicate and `pack` compaction.
-- CLI includes `add/upsert/replace`, `set-meta`, `stat`, `find/rm/replace-text`.
-- Recovery path for broken primary header (fixed backup + journal/backup records).
+- CLI includes `add/upsert/replace`, `set-meta`, `set-meta-many`, `stat`, `find/rm/replace-text`.
+- `pack`/`pack-many` support `--clear-meta` to drop entry metadata during repack.
+- Recovery path for broken primary header (fixed backup + journal/backup records + directory-scan fallback).
 - Read/write safety limits: `MaxEntrySize`, `MaxChunkSize`.
 
 ## Requirements
@@ -31,7 +32,8 @@ go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx
 go run ./cmd/fbx extract -o sample.fb2 books.fbx books/123.fb2
 go run ./cmd/fbx set-meta --meta-json '{"source":"flibusta"}' books.fbx books/123.fb2
-go run ./cmd/fbx pack --codec zstd books.fbx
+go run ./cmd/fbx set-meta-many --meta-file meta-map.json --ignore-missing books.fbx
+go run ./cmd/fbx pack --codec zstd --clear-meta books.fbx
 ```
 
 ## Quick Start (Library)
