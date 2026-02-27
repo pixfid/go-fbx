@@ -3,12 +3,15 @@ package format
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"hash/crc32"
+	"io"
 	"sort"
 )
 
 const dirFooterSize = 16
+const dirHeaderSize = 20
+const dirEntryHeadSize = 44
+const dirChunkRefSize = 32
 
 func EncodeDirectory(dir DirectoryV1) ([]byte, uint32, error) {
 	if dir.Flags != 0 {
@@ -65,7 +68,7 @@ func EncodeDirectory(dir DirectoryV1) ([]byte, uint32, error) {
 }
 
 func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (DirectoryV1, error) {
-	if len(blob) < 20+dirFooterSize {
+	if len(blob) < dirHeaderSize+dirFooterSize {
 		return DirectoryV1{}, ErrInvalidDir
 	}
 	if uint64(len(blob)) != expectedSize {
@@ -85,7 +88,7 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 	}
 	calc := crc32.ChecksumIEEE(blob[:len(blob)-dirFooterSize])
 	if calc != crc {
-		return DirectoryV1{}, errors.New("fbx: crc mismatch")
+		return DirectoryV1{}, ErrCRCMismatch
 	}
 
 	r := bytes.NewReader(blob)
@@ -101,29 +104,89 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 		return DirectoryV1{}, ErrInvalidDir
 	}
 
-	d := DirectoryV1{EntryCount: entryCount, Flags: flags, BuildUnix: buildUnix, Entries: make([]EntryV1, 0, entryCount)}
+	maxInt := int(^uint(0) >> 1)
+	if uint64(entryCount) > uint64(maxInt) {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+	maxEntriesByBlob := (len(blob) - dirHeaderSize - dirFooterSize) / dirEntryHeadSize
+	if uint64(entryCount) > uint64(maxEntriesByBlob) {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+
+	d := DirectoryV1{EntryCount: entryCount, Flags: flags, BuildUnix: buildUnix, Entries: make([]EntryV1, 0, int(entryCount))}
 	for i := 0; i < int(entryCount); i++ {
+		if r.Len() < dirEntryHeadSize+dirFooterSize {
+			return DirectoryV1{}, ErrInvalidDir
+		}
 		var e EntryV1
-		_ = binary.Read(r, binary.LittleEndian, &e.PathHash64)
-		_ = binary.Read(r, binary.LittleEndian, &e.MTimeUnix)
-		_ = binary.Read(r, binary.LittleEndian, &e.Mode)
-		_ = binary.Read(r, binary.LittleEndian, &e.EntryFlags)
-		_ = binary.Read(r, binary.LittleEndian, &e.FileSize)
-		_ = binary.Read(r, binary.LittleEndian, &e.ChunkCount)
-		_ = binary.Read(r, binary.LittleEndian, &e.MetaSize)
-		_ = binary.Read(r, binary.LittleEndian, &e.PathSize)
+		if err := binary.Read(r, binary.LittleEndian, &e.PathHash64); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.MTimeUnix); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.Mode); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.EntryFlags); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.FileSize); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.ChunkCount); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.MetaSize); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		if err := binary.Read(r, binary.LittleEndian, &e.PathSize); err != nil {
+			return DirectoryV1{}, ErrInvalidDir
+		}
 		if e.ChunkCount == 0 && e.FileSize != 0 {
 			return DirectoryV1{}, ErrInvalidDir
 		}
-		e.Chunks = make([]ChunkRefV1, e.ChunkCount)
+		if uint64(e.ChunkCount) > uint64(maxInt) || uint64(e.MetaSize) > uint64(maxInt) || uint64(e.PathSize) > uint64(maxInt) {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		chunksBytes, ok := mulUint64(uint64(e.ChunkCount), dirChunkRefSize)
+		if !ok {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		metaPathBytes, ok := addUint64(uint64(e.MetaSize), uint64(e.PathSize))
+		if !ok {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		needBytes, ok := addUint64(chunksBytes, metaPathBytes)
+		if !ok {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+		needBytes, ok = addUint64(needBytes, dirFooterSize)
+		if !ok || needBytes > uint64(r.Len()) {
+			return DirectoryV1{}, ErrInvalidDir
+		}
+
+		e.Chunks = make([]ChunkRefV1, int(e.ChunkCount))
 		var prevEnd uint64
 		for j := range e.Chunks {
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].ChunkOffset)
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].RawOffset)
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].RawSize)
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].CompSize)
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].CRC32Raw)
-			_ = binary.Read(r, binary.LittleEndian, &e.Chunks[j].Reserved)
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].ChunkOffset); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].RawOffset); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].RawSize); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].CompSize); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].CRC32Raw); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
+			if err := binary.Read(r, binary.LittleEndian, &e.Chunks[j].Reserved); err != nil {
+				return DirectoryV1{}, ErrInvalidDir
+			}
 			if e.Chunks[j].Reserved != 0 {
 				return DirectoryV1{}, ErrInvalidDir
 			}
@@ -138,15 +201,18 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 				return DirectoryV1{}, ErrInvalidDir
 			}
 		}
-		e.Meta = make([]byte, e.MetaSize)
-		if _, err := r.Read(e.Meta); err != nil {
+		e.Meta = make([]byte, int(e.MetaSize))
+		if _, err := io.ReadFull(r, e.Meta); err != nil {
 			return DirectoryV1{}, err
 		}
-		pathBytes := make([]byte, e.PathSize)
-		if _, err := r.Read(pathBytes); err != nil {
+		pathBytes := make([]byte, int(e.PathSize))
+		if _, err := io.ReadFull(r, pathBytes); err != nil {
 			return DirectoryV1{}, err
 		}
 		e.Path = string(pathBytes)
+		if e.Path == "" {
+			return DirectoryV1{}, ErrInvalidDir
+		}
 		if FNV1a64(e.Path) != e.PathHash64 {
 			return DirectoryV1{}, ErrInvalidDir
 		}
@@ -157,4 +223,21 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 		return DirectoryV1{}, ErrInvalidDir
 	}
 	return d, nil
+}
+
+func addUint64(a, b uint64) (uint64, bool) {
+	if a > ^uint64(0)-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func mulUint64(a, b uint64) (uint64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > ^uint64(0)/b {
+		return 0, false
+	}
+	return a * b, true
 }

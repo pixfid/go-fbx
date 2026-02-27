@@ -266,7 +266,7 @@ func TestStrictVerifyOption(t *testing.T) {
 		t.Fatalf("expected ErrCRCMismatch, got %v", err)
 	}
 
-	unsafe, err := fbx.Open(containerPath, &fbx.Options{StrictVerify: false})
+	unsafe, err := fbx.Open(containerPath, &fbx.Options{NoStrictVerify: true})
 	if err != nil {
 		t.Fatalf("open unsafe: %v", err)
 	}
@@ -404,8 +404,8 @@ func TestStoreIfAlreadyCompressedOption(t *testing.T) {
 
 	pathZstd := filepath.Join(dir, "zstd.fbx")
 	c2, err := fbx.Create(pathZstd, &fbx.Options{
-		DefaultCodec:             fbx.CodecZstd,
-		StoreIfAlreadyCompressed: false,
+		DefaultCodec:               fbx.CodecZstd,
+		NoStoreIfAlreadyCompressed: true,
 	})
 	if err != nil {
 		t.Fatalf("create store=false: %v", err)

@@ -13,15 +13,32 @@ const (
 type Options struct {
 	ChunkSizeText            int
 	ChunkSizeBin             int
-	DetectText               bool
 	DefaultCodec             Codec
 	DefaultLevel             int
-	StoreIfAlreadyCompressed bool
 	MaxWorkers               int
 	MaxEntrySize             uint64
 	MaxChunkSize             uint32
+
+	// The four options below default to true. Because Go zero-value is false,
+	// passing Options{SomeField: x} would unintentionally disable them.
+	// Use the No* flags below to explicitly opt out instead.
+	//
+	// These fields are read by the runtime but ignored by mergeOptions.
+	// They must be set via defaultOptions() or via the No* disable flags.
+	DetectText               bool
+	StoreIfAlreadyCompressed bool
 	SyncOnCommit             bool
 	StrictVerify             bool
+
+	// Explicit opt-out flags for the four default-true options above.
+	// Set NoStrictVerify: true to disable CRC verification on extraction.
+	// Set NoSyncOnCommit: true to skip fsync on commit (faster, less durable).
+	// Set NoDetectText: true to disable automatic text/binary detection.
+	// Set NoStoreIfAlreadyCompressed: true to force re-compression of already-compressed data.
+	NoStrictVerify             bool
+	NoSyncOnCommit             bool
+	NoDetectText               bool
+	NoStoreIfAlreadyCompressed bool
 }
 
 func defaultOptions() Options {

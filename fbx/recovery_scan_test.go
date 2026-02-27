@@ -2,6 +2,8 @@ package fbx
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,6 +128,33 @@ func TestOpenDirectoryScanFallsBackToPreviousDirectoryWhenLatestIsCorrupt(t *tes
 	}
 	if !bytes.Equal(out.Bytes(), oldBody) {
 		t.Fatalf("expected fallback to previous valid directory snapshot")
+	}
+}
+
+func TestReadDirectoryCandidateAtRejectsOverflowedEntrySizes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scan_overflow.bin")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 20+44+16)
+	copy(buf[:4], format.MagicDir[:])
+	binary.LittleEndian.PutUint32(buf[4:8], 1)  // entryCount
+	binary.LittleEndian.PutUint32(buf[8:12], 0) // flags
+	// Entry header starts at offset 20; chunkCount at +32.
+	binary.LittleEndian.PutUint32(buf[20+32:20+36], ^uint32(0))
+	copy(buf[len(buf)-16:len(buf)-12], format.MagicEnd[:])
+	binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(len(buf)))
+
+	if _, err := f.WriteAt(buf, 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dirOut, _, _, err := readDirectoryCandidateAt(f, 0, uint64(len(buf)))
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got dir=%+v err=%v", dirOut, err)
 	}
 }
 

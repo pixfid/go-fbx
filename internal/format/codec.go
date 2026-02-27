@@ -14,6 +14,10 @@ func compressPayload(raw []byte, codec Codec, level uint8) ([]byte, error) {
 }
 
 func decompressPayload(comp []byte, codec Codec, expectedRawSize uint32) ([]byte, error) {
+	maxInt := uint64(int(^uint(0) >> 1))
+	if uint64(expectedRawSize) > maxInt {
+		return nil, ErrLimitExceeded
+	}
 	switch codec {
 	case CodecStore:
 		return append([]byte(nil), comp...), nil

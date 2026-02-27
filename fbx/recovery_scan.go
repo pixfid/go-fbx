@@ -115,7 +115,8 @@ func buildHeaderFromDirectoryAt(f *os.File, dirOffset, fileSize uint64) (format.
 }
 
 func readDirectoryCandidateAt(f *os.File, dirOffset, fileSize uint64) (format.DirectoryV1, uint64, uint32, error) {
-	if dirOffset+recoveryDirHeadSize+recoveryDirFooterSize > fileSize {
+	minSize, ok := addUint64Checked(recoveryDirHeadSize, recoveryDirFooterSize)
+	if !ok || !regionWithinFile(dirOffset, minSize, fileSize) {
 		return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
 	}
 
@@ -138,30 +139,57 @@ func readDirectoryCandidateAt(f *os.File, dirOffset, fileSize uint64) (format.Di
 
 	cursor := uint64(recoveryDirHeadSize)
 	for i := uint32(0); i < entryCount; i++ {
-		if dirOffset+cursor+recoveryDirEntryHeadSize > fileSize {
+		entryHeadEnd, ok := addUint64Checked(cursor, recoveryDirEntryHeadSize)
+		if !ok || !regionWithinFile(dirOffset, entryHeadEnd, fileSize) {
 			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
 		}
 		var entryHead [recoveryDirEntryHeadSize]byte
-		if _, err := f.ReadAt(entryHead[:], int64(dirOffset+cursor)); err != nil {
+		entryOff, ok := addUint64Checked(dirOffset, cursor)
+		if !ok {
+			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
+		}
+		if _, err := f.ReadAt(entryHead[:], int64(entryOff)); err != nil {
 			return format.DirectoryV1{}, 0, 0, err
 		}
 		chunkCount := binary.LittleEndian.Uint32(entryHead[32:36])
 		metaSize := binary.LittleEndian.Uint32(entryHead[36:40])
 		pathSize := binary.LittleEndian.Uint32(entryHead[40:44])
 
-		cursor += recoveryDirEntryHeadSize
-		cursor += uint64(chunkCount) * recoveryChunkRefSize
-		cursor += uint64(metaSize) + uint64(pathSize)
-		if dirOffset+cursor+recoveryDirFooterSize > fileSize {
+		cursor = entryHeadEnd
+		chunksBytes, ok := mulUint64Checked(uint64(chunkCount), recoveryChunkRefSize)
+		if !ok {
+			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
+		}
+		cursor, ok = addUint64Checked(cursor, chunksBytes)
+		if !ok {
+			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
+		}
+		metaPathBytes, ok := addUint64Checked(uint64(metaSize), uint64(pathSize))
+		if !ok {
+			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
+		}
+		cursor, ok = addUint64Checked(cursor, metaPathBytes)
+		if !ok {
+			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
+		}
+		withFooter, ok := addUint64Checked(cursor, recoveryDirFooterSize)
+		if !ok || !regionWithinFile(dirOffset, withFooter, fileSize) {
 			return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
 		}
 	}
 
-	dirSize := cursor + recoveryDirFooterSize
-	if dirOffset+dirSize > fileSize {
+	dirSize, ok := addUint64Checked(cursor, recoveryDirFooterSize)
+	if !ok || !regionWithinFile(dirOffset, dirSize, fileSize) {
 		return format.DirectoryV1{}, 0, 0, ErrInvalidFormat
 	}
-	blob := make([]byte, dirSize)
+	if dirSize > maxDirectoryBlobSize {
+		return format.DirectoryV1{}, 0, 0, ErrLimitExceeded
+	}
+	maxInt := uint64(int(^uint(0) >> 1))
+	if dirSize > maxInt {
+		return format.DirectoryV1{}, 0, 0, ErrLimitExceeded
+	}
+	blob := make([]byte, int(dirSize))
 	if _, err := f.ReadAt(blob, int64(dirOffset)); err != nil {
 		return format.DirectoryV1{}, 0, 0, err
 	}

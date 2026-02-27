@@ -53,3 +53,53 @@ func TestDirectoryDecodeValidations(t *testing.T) {
 		t.Fatalf("expected ErrInvalidDir on non-zero flags, got %v", err)
 	}
 }
+
+func TestDecodeDirectoryRejectsOversizedEntryFieldsWithoutPanic(t *testing.T) {
+	base := DirectoryV1{
+		Entries: []EntryV1{
+			{
+				Path:     "a",
+				FileSize: 1,
+				Chunks:   []ChunkRefV1{{ChunkOffset: 1, RawOffset: 0, RawSize: 1, CompSize: 1, CRC32Raw: 1}},
+			},
+		},
+	}
+	blob, _, err := EncodeDirectory(base)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	entryOffset := dirHeaderSize
+
+	mutate := func(offset int, value uint32) []byte {
+		out := append([]byte(nil), blob...)
+		binary.LittleEndian.PutUint32(out[offset:offset+4], value)
+		newCRC := crc32.ChecksumIEEE(out[:len(out)-dirFooterSize])
+		binary.LittleEndian.PutUint32(out[len(out)-12:len(out)-8], newCRC)
+		return out
+	}
+
+	cases := []struct {
+		name   string
+		offset int
+		value  uint32
+	}{
+		{name: "chunk-count", offset: entryOffset + 32, value: ^uint32(0)},
+		{name: "meta-size", offset: entryOffset + 36, value: ^uint32(0)},
+		{name: "path-size", offset: entryOffset + 40, value: ^uint32(0)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("DecodeDirectory panicked: %v", r)
+				}
+			}()
+			corrupt := mutate(tc.offset, tc.value)
+			crc := binary.LittleEndian.Uint32(corrupt[len(corrupt)-12 : len(corrupt)-8])
+			if _, err := DecodeDirectory(corrupt, crc, uint64(len(corrupt))); !errors.Is(err, ErrInvalidDir) {
+				t.Fatalf("expected ErrInvalidDir, got %v", err)
+			}
+		})
+	}
+}

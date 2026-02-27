@@ -29,6 +29,7 @@ var (
 	ErrInvalidChunk  = errors.New("fbx: invalid chunk")
 	ErrCRCMismatch   = errors.New("fbx: crc mismatch")
 	ErrBadCodec      = errors.New("fbx: unsupported codec")
+	ErrLimitExceeded = errors.New("fbx: limit exceeded")
 )
 
 type HeaderV1 struct {

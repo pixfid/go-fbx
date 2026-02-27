@@ -1,7 +1,6 @@
 package fbx
 
 import (
-	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -23,6 +22,8 @@ type Container struct {
 	header  format.HeaderV1
 	entries map[string]format.EntryV1
 }
+
+const maxDirectoryBlobSize uint64 = 1 << 30 // 1 GiB hard cap for directory blob reads.
 
 func Open(path string, opts *Options) (*Container, error) {
 	o := defaultOptions()
@@ -91,9 +92,6 @@ func Open(path string, opts *Options) (*Container, error) {
 	}
 
 	_ = f.Close()
-	if err != nil {
-		return nil, mapErr(err)
-	}
 	return nil, mapErr(recErr)
 }
 
@@ -303,16 +301,19 @@ func (c *Container) Remove(path string) error {
 
 func (c *Container) Begin() (*Tx, error) {
 	c.txMu.Lock()
+	// c.file is protected by c.mu; read it under the same lock used by Close().
+	c.mu.RLock()
 	if c.file == nil {
+		c.mu.RUnlock()
 		c.txMu.Unlock()
 		return nil, errors.New("fbx: container closed")
 	}
 	st, err := c.file.Stat()
 	if err != nil {
+		c.mu.RUnlock()
 		c.txMu.Unlock()
 		return nil, err
 	}
-	c.mu.RLock()
 	entries := make(map[string]format.EntryV1, len(c.entries))
 	for k, v := range c.entries {
 		entries[k] = cloneEntry(v)
@@ -340,8 +341,8 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 	}
 	c.mu.RUnlock()
 
-	dirBlob := make([]byte, h.DirSize)
-	if _, err := c.file.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+	dirBlob, err := readDirectoryBlobByHeader(c.file, h)
+	if err != nil {
 		report.Errors = append(report.Errors, err)
 		return report, errors.Join(report.Errors...)
 	}
@@ -361,7 +362,7 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 		}
 		for _, ref := range refs {
 			report.ChunksChecked++
-			rec, err := format.ReadChunkRecordAt(c.file, int64(ref.ChunkOffset))
+			rec, err := format.ReadChunkRecordAtOptLimited(c.file, int64(ref.ChunkOffset), true, ref.RawSize, ref.CompSize)
 			if err != nil {
 				report.Errors = append(report.Errors, mapErr(err))
 				continue
@@ -402,15 +403,17 @@ func (r *entryReader) Read(p []byte) (int, error) {
 				}
 				return n, nil
 			}
+			// Do not increment r.idx yet: if any check below fails and n > 0,
+			// we return the already-accumulated bytes and defer the error to the
+			// next Read call (which will retry with the same r.idx).
 			ref := r.chunks[r.idx]
-			r.idx++
 			if r.maxChunk > 0 && ref.RawSize > r.maxChunk {
 				if n > 0 {
 					return n, nil
 				}
 				return 0, ErrLimitExceeded
 			}
-			rec, err := format.ReadChunkRecordAtOpt(r.f, int64(ref.ChunkOffset), r.verifyCRC)
+			rec, err := format.ReadChunkRecordAtOptLimited(r.f, int64(ref.ChunkOffset), r.verifyCRC, ref.RawSize, ref.CompSize)
 			if err != nil {
 				if n > 0 {
 					return n, nil
@@ -429,6 +432,8 @@ func (r *entryReader) Read(p []byte) (int, error) {
 				}
 				return 0, ErrLimitExceeded
 			}
+			// All checks passed; advance the index and load the payload.
+			r.idx++
 			r.cur = rec.Payload
 			r.curRead = 0
 		}
@@ -467,18 +472,14 @@ func mapErr(err error) error {
 	if errors.Is(err, format.ErrBadCodec) {
 		return ErrUnsupportedCodec
 	}
+	if errors.Is(err, format.ErrLimitExceeded) {
+		return ErrLimitExceeded
+	}
 	if errors.Is(err, format.ErrCRCMismatch) {
 		return ErrCRCMismatch
 	}
 	if errors.Is(err, pathutil.ErrInvalidPath) {
 		return ErrPathInvalid
-	}
-	msg := err.Error()
-	if msg == "fbx: crc mismatch" {
-		return ErrCRCMismatch
-	}
-	if msg == "fbx: unsupported codec" {
-		return ErrUnsupportedCodec
 	}
 	return err
 }
@@ -506,17 +507,20 @@ func mergeOptions(base, in Options) Options {
 	if in.MaxChunkSize > 0 {
 		out.MaxChunkSize = in.MaxChunkSize
 	}
-	if in.DetectText != base.DetectText {
-		out.DetectText = in.DetectText
+	// Bool options that default to true cannot use the zero-value (false) to
+	// express intent: Options{MaxWorkers: 4} would silently disable StrictVerify
+	// and SyncOnCommit. Explicit opt-out is handled via the No* flags instead.
+	if in.NoDetectText {
+		out.DetectText = false
 	}
-	if in.StoreIfAlreadyCompressed != base.StoreIfAlreadyCompressed {
-		out.StoreIfAlreadyCompressed = in.StoreIfAlreadyCompressed
+	if in.NoStoreIfAlreadyCompressed {
+		out.StoreIfAlreadyCompressed = false
 	}
-	if in.SyncOnCommit != base.SyncOnCommit {
-		out.SyncOnCommit = in.SyncOnCommit
+	if in.NoSyncOnCommit {
+		out.SyncOnCommit = false
 	}
-	if in.StrictVerify != base.StrictVerify {
-		out.StrictVerify = in.StrictVerify
+	if in.NoStrictVerify {
+		out.StrictVerify = false
 	}
 	return out
 }
@@ -531,28 +535,9 @@ func appendAt(f *os.File, off uint64, data []byte) (uint64, error) {
 	return off + uint64(len(data)), nil
 }
 
-func readAll(r io.Reader) ([]byte, error) {
-	buf := bytes.NewBuffer(nil)
-	_, err := io.Copy(buf, r)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 func validateHeaderDirectory(f *os.File, h format.HeaderV1) error {
-	if h.DirOffset == 0 || h.DirSize == 0 {
-		return ErrInvalidFormat
-	}
-	st, err := f.Stat()
+	dirBlob, err := readDirectoryBlobByHeader(f, h)
 	if err != nil {
-		return err
-	}
-	if h.DirOffset+h.DirSize > uint64(st.Size()) {
-		return ErrInvalidFormat
-	}
-	dirBlob := make([]byte, h.DirSize)
-	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
 		return err
 	}
 	_, err = format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
@@ -560,11 +545,8 @@ func validateHeaderDirectory(f *os.File, h format.HeaderV1) error {
 }
 
 func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.EntryV1, error) {
-	if err := validateHeaderDirectory(f, h); err != nil {
-		return nil, mapErr(err)
-	}
-	dirBlob := make([]byte, h.DirSize)
-	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+	dirBlob, err := readDirectoryBlobByHeader(f, h)
+	if err != nil {
 		return nil, mapErr(err)
 	}
 	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
@@ -579,4 +561,54 @@ func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.Entry
 		entries[e.Path] = cloneEntry(e)
 	}
 	return entries, nil
+}
+
+func readDirectoryBlobByHeader(f *os.File, h format.HeaderV1) ([]byte, error) {
+	if h.DirOffset == 0 || h.DirSize == 0 {
+		return nil, ErrInvalidFormat
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	fileSize := uint64(st.Size())
+	if !regionWithinFile(h.DirOffset, h.DirSize, fileSize) {
+		return nil, ErrInvalidFormat
+	}
+	if h.DirSize > maxDirectoryBlobSize {
+		return nil, ErrLimitExceeded
+	}
+	maxInt := uint64(int(^uint(0) >> 1))
+	if h.DirSize > maxInt {
+		return nil, ErrLimitExceeded
+	}
+	dirBlob := make([]byte, int(h.DirSize))
+	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+		return nil, err
+	}
+	return dirBlob, nil
+}
+
+func regionWithinFile(offset, size, fileSize uint64) bool {
+	if offset > fileSize {
+		return false
+	}
+	return size <= fileSize-offset
+}
+
+func addUint64Checked(a, b uint64) (uint64, bool) {
+	if a > ^uint64(0)-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func mulUint64Checked(a, b uint64) (uint64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > ^uint64(0)/b {
+		return 0, false
+	}
+	return a * b, true
 }

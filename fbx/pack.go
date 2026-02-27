@@ -60,9 +60,9 @@ func Pack(inPath, outPath string, opts *PackOptions) error {
 
 func packInto(inPath, outPath string, opts PackOptions) (retErr error) {
 	inOpts := &Options{
-		StrictVerify: !opts.FastUnsafe,
-		MaxEntrySize: opts.MaxEntrySize,
-		MaxChunkSize: opts.MaxChunkSize,
+		NoStrictVerify: opts.FastUnsafe,
+		MaxEntrySize:   opts.MaxEntrySize,
+		MaxChunkSize:   opts.MaxChunkSize,
 	}
 	src, err := Open(inPath, inOpts)
 	if err != nil {

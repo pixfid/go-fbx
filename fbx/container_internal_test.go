@@ -12,22 +12,41 @@ import (
 	"github.com/pixfid/go-fbx/internal/pathutil"
 )
 
+// readAll is a test helper; it lives here (not in production code).
+func readAll(r io.Reader) ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	_, err := io.Copy(buf, r)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func TestMergeOptionsAndMapErr(t *testing.T) {
 	base := defaultOptions()
-	in := Options{
-		ChunkSizeText:            128,
-		ChunkSizeBin:             256,
-		DefaultCodec:             CodecZstd,
-		DefaultLevel:             3,
-		MaxWorkers:               2,
-		MaxEntrySize:             100,
-		MaxChunkSize:             10,
-		DetectText:               false,
-		StoreIfAlreadyCompressed: false,
-		SyncOnCommit:             false,
-		StrictVerify:             false,
+
+	// Passing a partial Options must NOT silently disable default-true booleans.
+	partial := Options{MaxWorkers: 2}
+	out := mergeOptions(base, partial)
+	if !out.DetectText || !out.StoreIfAlreadyCompressed || !out.SyncOnCommit || !out.StrictVerify {
+		t.Fatalf("partial Options must preserve default-true booleans: %+v", out)
 	}
-	out := mergeOptions(base, in)
+
+	// Explicit opt-out via No* flags must work.
+	in := Options{
+		ChunkSizeText:              128,
+		ChunkSizeBin:               256,
+		DefaultCodec:               CodecZstd,
+		DefaultLevel:               3,
+		MaxWorkers:                 2,
+		MaxEntrySize:               100,
+		MaxChunkSize:               10,
+		NoDetectText:               true,
+		NoStoreIfAlreadyCompressed: true,
+		NoSyncOnCommit:             true,
+		NoStrictVerify:             true,
+	}
+	out = mergeOptions(base, in)
 	if out.ChunkSizeText != 128 || out.ChunkSizeBin != 256 || out.DefaultCodec != CodecZstd {
 		t.Fatalf("unexpected merged chunk/codec options: %+v", out)
 	}
@@ -35,7 +54,7 @@ func TestMergeOptionsAndMapErr(t *testing.T) {
 		t.Fatalf("unexpected merged numeric options: %+v", out)
 	}
 	if out.DetectText || out.StoreIfAlreadyCompressed || out.SyncOnCommit || out.StrictVerify {
-		t.Fatalf("unexpected merged bool options: %+v", out)
+		t.Fatalf("No* flags must disable default-true booleans: %+v", out)
 	}
 
 	cases := []struct {
@@ -46,6 +65,7 @@ func TestMergeOptionsAndMapErr(t *testing.T) {
 		{format.ErrInvalidDir, ErrInvalidFormat},
 		{format.ErrInvalidChunk, ErrInvalidFormat},
 		{format.ErrBadCodec, ErrUnsupportedCodec},
+		{format.ErrLimitExceeded, ErrLimitExceeded},
 		{format.ErrCRCMismatch, ErrCRCMismatch},
 		{pathutil.ErrInvalidPath, ErrPathInvalid},
 	}
@@ -119,6 +139,31 @@ func TestReadEntriesByHeaderRejectsDuplicatePath(t *testing.T) {
 	}
 }
 
+func TestReadEntriesByHeaderRejectsOversizedDirectoryBlob(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oversized-dir.fbx")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	needSize := int64(format.HeaderSize) + int64(maxDirectoryBlobSize) + 1
+	if err := f.Truncate(needSize); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	h := format.HeaderV1{
+		Magic:      format.MagicHeader,
+		Version:    format.VersionV1,
+		HeaderSize: format.HeaderSize,
+		DirOffset:  format.HeaderSize,
+		DirSize:    maxDirectoryBlobSize + 1,
+	}
+	if _, err := readEntriesByHeader(f, h); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
+	}
+}
+
 func TestEntryReaderHonorsChunkAndEntryLimits(t *testing.T) {
 	rec, _, err := format.EncodeChunkRecord([]byte("hello"), format.CodecStore, 0)
 	if err != nil {
@@ -149,6 +194,29 @@ func TestEntryReaderHonorsChunkAndEntryLimits(t *testing.T) {
 	}
 	if r.cur != nil {
 		t.Fatalf("expected current buffer reset")
+	}
+}
+
+func TestEntryReaderRejectsChunkHeaderCompSizeMismatchBeforePayloadRead(t *testing.T) {
+	rec := make([]byte, 16)
+	rec[0] = 'C'
+	rec[1] = 'K'
+	rec[2] = byte(format.CodecStore)
+	rec[3] = 0
+	// Header claims huge compressed payload, but ref allows only 8.
+	rec[4] = 5
+	rec[8] = 0xFF
+	rec[9] = 0xFF
+	rec[10] = 0xFF
+	rec[11] = 0x7F
+
+	r := &entryReader{
+		f:      bytes.NewReader(rec),
+		chunks: []format.ChunkRefV1{{ChunkOffset: 0, RawSize: 5, CompSize: 8}},
+	}
+	buf := make([]byte, 8)
+	if _, err := r.Read(buf); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
 }
 

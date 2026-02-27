@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"testing"
@@ -55,5 +56,20 @@ func TestChunkReadInvalidMagicAndSizes(t *testing.T) {
 
 	if got := crc32.ChecksumIEEE([]byte("hello")); got == 0 {
 		t.Fatalf("sanity crc check failed")
+	}
+}
+
+func TestChunkReadHonorsLimitsBeforePayloadRead(t *testing.T) {
+	var rec [chunkHeaderSize]byte
+	rec[0] = MagicChunk[0]
+	rec[1] = MagicChunk[1]
+	rec[2] = byte(CodecStore)
+	rec[3] = 0
+	binary.LittleEndian.PutUint32(rec[4:8], 8)
+	binary.LittleEndian.PutUint32(rec[8:12], 1<<20)
+	binary.LittleEndian.PutUint32(rec[12:16], 0)
+
+	if _, err := ReadChunkRecordAtOptLimited(bytes.NewReader(rec[:]), 0, false, 0, 16); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded on comp-size limit, got %v", err)
 	}
 }
