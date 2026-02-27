@@ -193,11 +193,15 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 			if j > 0 && e.Chunks[j].RawOffset < prevEnd {
 				return DirectoryV1{}, ErrInvalidDir
 			}
-			prevEnd = e.Chunks[j].RawOffset + uint64(e.Chunks[j].RawSize)
+			prevEnd, ok = addUint64(e.Chunks[j].RawOffset, uint64(e.Chunks[j].RawSize))
+			if !ok {
+				return DirectoryV1{}, ErrInvalidDir
+			}
 		}
 		if e.FileSize > 0 && len(e.Chunks) > 0 {
 			last := e.Chunks[len(e.Chunks)-1]
-			if last.RawOffset+uint64(last.RawSize) != e.FileSize {
+			end, ok := addUint64(last.RawOffset, uint64(last.RawSize))
+			if !ok || end != e.FileSize {
 				return DirectoryV1{}, ErrInvalidDir
 			}
 		}

@@ -103,3 +103,34 @@ func TestDecodeDirectoryRejectsOversizedEntryFieldsWithoutPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeDirectoryRejectsChunkRawRangeOverflow(t *testing.T) {
+	base := DirectoryV1{
+		Entries: []EntryV1{
+			{
+				Path:     "a",
+				FileSize: 1,
+				Chunks:   []ChunkRefV1{{ChunkOffset: 1, RawOffset: 0, RawSize: 1, CompSize: 1, CRC32Raw: 1}},
+			},
+		},
+	}
+	blob, _, err := EncodeDirectory(base)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	corrupt := append([]byte(nil), blob...)
+	entryOffset := dirHeaderSize
+	fileSizePos := entryOffset + 24
+	chunkPos := entryOffset + dirEntryHeadSize
+	rawOffsetPos := chunkPos + 8
+	rawSizePos := chunkPos + 16
+	binary.LittleEndian.PutUint64(corrupt[fileSizePos:fileSizePos+8], 6)
+	binary.LittleEndian.PutUint64(corrupt[rawOffsetPos:rawOffsetPos+8], ^uint64(0)-3)
+	binary.LittleEndian.PutUint32(corrupt[rawSizePos:rawSizePos+4], 10)
+	newCRC := crc32.ChecksumIEEE(corrupt[:len(corrupt)-dirFooterSize])
+	binary.LittleEndian.PutUint32(corrupt[len(corrupt)-12:len(corrupt)-8], newCRC)
+
+	if _, err := DecodeDirectory(corrupt, newCRC, uint64(len(corrupt))); !errors.Is(err, ErrInvalidDir) {
+		t.Fatalf("expected ErrInvalidDir, got %v", err)
+	}
+}

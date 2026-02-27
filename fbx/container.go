@@ -40,58 +40,88 @@ func Open(path string, opts *Options) (*Container, error) {
 		_ = f.Close()
 		return nil, mapErr(err)
 	}
+	var openErr error
 	h, err := format.UnmarshalHeaderV1(headBuf)
 	if err == nil {
 		entries, err := readEntriesByHeader(f, h)
 		if err == nil {
 			return &Container{file: f, opts: o, header: h, entries: entries}, nil
 		}
+		openErr = mapErr(err)
+		if !shouldAttemptOpenRecovery(openErr) {
+			_ = f.Close()
+			return nil, openErr
+		}
+	} else {
+		openErr = mapErr(err)
+	}
+
+	tryRecovered := func(recovered format.HeaderV1) (*Container, error) {
+		entries, rerr := readEntriesByHeader(f, recovered)
+		if rerr != nil {
+			rerr = mapErr(rerr)
+			if shouldAttemptOpenRecovery(rerr) {
+				if openErr == nil {
+					openErr = rerr
+				}
+				return nil, nil
+			}
+			return nil, rerr
+		}
+		recoveredBuf, mErr := recovered.MarshalBinary()
+		if mErr == nil {
+			_, _ = f.WriteAt(recoveredBuf, 0)
+			_ = f.Sync()
+		}
+		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
 	}
 
 	recovered, recErr := recoverHeaderFromFixedBackup(f)
 	if recErr == nil {
-		entries, rerr := readEntriesByHeader(f, recovered)
-		if rerr == nil {
-			recoveredBuf, mErr := recovered.MarshalBinary()
-			if mErr == nil {
-				_, _ = f.WriteAt(recoveredBuf, 0)
-				_ = f.Sync()
-			}
-			return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+		c, fatal := tryRecovered(recovered)
+		if fatal != nil {
+			_ = f.Close()
+			return nil, fatal
 		}
+		if c != nil {
+			return c, nil
+		}
+	} else if openErr == nil {
+		openErr = mapErr(recErr)
 	}
 
 	recovered, recErr = recoverBestHeader(f)
 	if recErr == nil {
-		entries, err := readEntriesByHeader(f, recovered)
-		if err != nil {
+		c, fatal := tryRecovered(recovered)
+		if fatal != nil {
 			_ = f.Close()
-			return nil, mapErr(err)
+			return nil, fatal
 		}
-		recoveredBuf, mErr := recovered.MarshalBinary()
-		if mErr == nil {
-			_, _ = f.WriteAt(recoveredBuf, 0)
-			_ = f.Sync()
+		if c != nil {
+			return c, nil
 		}
-		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+	} else if openErr == nil {
+		openErr = mapErr(recErr)
 	}
 
 	recovered, recErr = recoverHeaderFromDirectoryScan(f)
 	if recErr == nil {
-		entries, err := readEntriesByHeader(f, recovered)
-		if err != nil {
+		c, fatal := tryRecovered(recovered)
+		if fatal != nil {
 			_ = f.Close()
-			return nil, mapErr(err)
+			return nil, fatal
 		}
-		recoveredBuf, mErr := recovered.MarshalBinary()
-		if mErr == nil {
-			_, _ = f.WriteAt(recoveredBuf, 0)
-			_ = f.Sync()
+		if c != nil {
+			return c, nil
 		}
-		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+	} else if openErr == nil {
+		openErr = mapErr(recErr)
 	}
 
 	_ = f.Close()
+	if openErr != nil {
+		return nil, openErr
+	}
 	return nil, mapErr(recErr)
 }
 
@@ -553,6 +583,13 @@ func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.Entry
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDirectoryChunkOffsets(dir, uint64(st.Size())); err != nil {
+		return nil, err
+	}
 	entries := make(map[string]format.EntryV1, len(dir.Entries))
 	for _, e := range dir.Entries {
 		if _, ok := entries[e.Path]; ok {
@@ -611,4 +648,8 @@ func mulUint64Checked(a, b uint64) (uint64, bool) {
 		return 0, false
 	}
 	return a * b, true
+}
+
+func shouldAttemptOpenRecovery(err error) bool {
+	return errors.Is(err, ErrInvalidFormat) || errors.Is(err, ErrCRCMismatch)
 }

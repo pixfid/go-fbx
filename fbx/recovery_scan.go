@@ -213,8 +213,12 @@ func readDirectoryCandidateAt(f *os.File, dirOffset, fileSize uint64) (format.Di
 func validateDirectoryChunkOffsets(dir format.DirectoryV1, fileSize uint64) error {
 	for _, e := range dir.Entries {
 		for _, ref := range e.Chunks {
-			chunkEnd := ref.ChunkOffset + 16 + uint64(ref.CompSize)
-			if chunkEnd < ref.ChunkOffset || chunkEnd > fileSize {
+			chunkEnd, ok := addUint64Checked(ref.ChunkOffset, 16)
+			if !ok {
+				return ErrInvalidFormat
+			}
+			chunkEnd, ok = addUint64Checked(chunkEnd, uint64(ref.CompSize))
+			if !ok || chunkEnd > fileSize {
 				return ErrInvalidFormat
 			}
 		}

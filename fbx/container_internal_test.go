@@ -164,6 +164,79 @@ func TestReadEntriesByHeaderRejectsOversizedDirectoryBlob(t *testing.T) {
 	}
 }
 
+func TestReadEntriesByHeaderRejectsOutOfRangeChunkOffset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad-chunk-offset.fbx")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	blob, crc, err := format.EncodeDirectory(format.DirectoryV1{
+		Entries: []format.EntryV1{
+			{
+				Path:     "a",
+				FileSize: 1,
+				Chunks:   []format.ChunkRefV1{{ChunkOffset: 1 << 20, RawOffset: 0, RawSize: 1, CompSize: 1, CRC32Raw: 1}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode dir: %v", err)
+	}
+	h := format.HeaderV1{
+		Magic:      format.MagicHeader,
+		Version:    format.VersionV1,
+		HeaderSize: format.HeaderSize,
+		DirOffset:  format.HeaderSize,
+		DirSize:    uint64(len(blob)),
+		DirCRC32:   crc,
+	}
+	hb, _ := h.MarshalBinary()
+	if _, err := f.WriteAt(hb, 0); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if _, err := f.WriteAt(blob, int64(h.DirOffset)); err != nil {
+		t.Fatalf("write dir: %v", err)
+	}
+	if _, err := readEntriesByHeader(f, h); !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got %v", err)
+	}
+}
+
+func TestOpenReturnsLimitExceededFromPrimaryHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "open-limit.fbx")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	h := format.HeaderV1{
+		Magic:      format.MagicHeader,
+		Version:    format.VersionV1,
+		HeaderSize: format.HeaderSize,
+		DirOffset:  format.HeaderSize,
+		DirSize:    maxDirectoryBlobSize + 1,
+	}
+	hb, _ := h.MarshalBinary()
+	if _, err := f.WriteAt(hb, 0); err != nil {
+		_ = f.Close()
+		t.Fatalf("write header: %v", err)
+	}
+	if err := f.Truncate(int64(h.DirOffset + h.DirSize)); err != nil {
+		_ = f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if _, err := Open(path, nil); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
+	}
+}
+
 func TestEntryReaderHonorsChunkAndEntryLimits(t *testing.T) {
 	rec, _, err := format.EncodeChunkRecord([]byte("hello"), format.CodecStore, 0)
 	if err != nil {
