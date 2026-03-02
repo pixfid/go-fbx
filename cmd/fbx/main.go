@@ -21,6 +21,8 @@ import (
 	"github.com/pixfid/go-fbx/internal/format"
 )
 
+const maxInspectDirectoryBlobSize uint64 = 1 << 30 // 1 GiB cap for CLI inspection reads.
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -341,25 +343,12 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 	if err != nil {
 		return codecReport{}, err
 	}
-
-	headBuf := make([]byte, format.HeaderSize)
-	if _, err := f.ReadAt(headBuf, 0); err != nil {
-		return codecReport{}, err
-	}
-	h, err := format.UnmarshalHeaderV1(headBuf)
+	h, dir, err := readHeaderAndDirectoryForInspect(f, uint64(st.Size()))
 	if err != nil {
 		return codecReport{}, err
 	}
 	deadBytes := binary.LittleEndian.Uint64(h.Reserved[8:16])
 	churnOps := binary.LittleEndian.Uint64(h.Reserved[16:24])
-	dirBlob := make([]byte, h.DirSize)
-	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
-		return codecReport{}, err
-	}
-	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
-	if err != nil {
-		return codecReport{}, err
-	}
 
 	counts := map[string]int{
 		"store": 0,
@@ -427,20 +416,11 @@ func inspectEntryCodecs(containerPath string) (map[string]string, error) {
 		return nil, err
 	}
 	defer f.Close()
-
-	headBuf := make([]byte, format.HeaderSize)
-	if _, err := f.ReadAt(headBuf, 0); err != nil {
-		return nil, err
-	}
-	h, err := format.UnmarshalHeaderV1(headBuf)
+	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	dirBlob := make([]byte, h.DirSize)
-	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
-		return nil, err
-	}
-	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	_, dir, err := readHeaderAndDirectoryForInspect(f, uint64(st.Size()))
 	if err != nil {
 		return nil, err
 	}
@@ -480,6 +460,69 @@ func inspectEntryCodecs(containerPath string) (map[string]string, error) {
 		out[e.Path] = summary
 	}
 	return out, nil
+}
+
+func readHeaderAndDirectoryForInspect(f *os.File, fileSize uint64) (format.HeaderV1, format.DirectoryV1, error) {
+	headBuf := make([]byte, format.HeaderSize)
+	if _, err := f.ReadAt(headBuf, 0); err != nil {
+		return format.HeaderV1{}, format.DirectoryV1{}, err
+	}
+	h, err := format.UnmarshalHeaderV1(headBuf)
+	if err != nil {
+		return format.HeaderV1{}, format.DirectoryV1{}, err
+	}
+	if h.DirOffset == 0 || h.DirSize == 0 || !regionWithinFile(h.DirOffset, h.DirSize, fileSize) {
+		return format.HeaderV1{}, format.DirectoryV1{}, fbx.ErrInvalidFormat
+	}
+	if h.DirSize > maxInspectDirectoryBlobSize {
+		return format.HeaderV1{}, format.DirectoryV1{}, fbx.ErrLimitExceeded
+	}
+	maxInt := uint64(int(^uint(0) >> 1))
+	if h.DirSize > maxInt {
+		return format.HeaderV1{}, format.DirectoryV1{}, fbx.ErrLimitExceeded
+	}
+	dirBlob := make([]byte, int(h.DirSize))
+	if _, err := f.ReadAt(dirBlob, int64(h.DirOffset)); err != nil {
+		return format.HeaderV1{}, format.DirectoryV1{}, err
+	}
+	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	if err != nil {
+		return format.HeaderV1{}, format.DirectoryV1{}, err
+	}
+	if err := validateInspectChunkRefs(dir, fileSize); err != nil {
+		return format.HeaderV1{}, format.DirectoryV1{}, err
+	}
+	return h, dir, nil
+}
+
+func validateInspectChunkRefs(dir format.DirectoryV1, fileSize uint64) error {
+	for _, e := range dir.Entries {
+		for _, ref := range e.Chunks {
+			end, ok := addUint64Checked(ref.ChunkOffset, 16)
+			if !ok {
+				return fbx.ErrInvalidFormat
+			}
+			end, ok = addUint64Checked(end, uint64(ref.CompSize))
+			if !ok || end > fileSize {
+				return fbx.ErrInvalidFormat
+			}
+		}
+	}
+	return nil
+}
+
+func regionWithinFile(offset, size, fileSize uint64) bool {
+	if offset > fileSize {
+		return false
+	}
+	return size <= fileSize-offset
+}
+
+func addUint64Checked(a, b uint64) (uint64, bool) {
+	if a > ^uint64(0)-b {
+		return 0, false
+	}
+	return a + b, true
 }
 
 func readChunkCodecAt(r io.ReaderAt, off int64) (format.Codec, error) {

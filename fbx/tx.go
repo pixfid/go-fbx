@@ -571,7 +571,11 @@ func (tx *Tx) writeChunksSequential(r io.Reader, codec format.Codec, level uint8
 			return nil, rawOff, readErr
 		}
 
-		if maxEntry > 0 && rawOff+uint64(n) > maxEntry {
+		nextRawOff, ok := addUint64Checked(rawOff, uint64(n))
+		if !ok {
+			return nil, rawOff, ErrLimitExceeded
+		}
+		if maxEntry > 0 && nextRawOff > maxEntry {
 			return nil, rawOff, ErrLimitExceeded
 		}
 		rec, crc, err := format.EncodeChunkRecord(buf[:n], codec, level)
@@ -590,7 +594,7 @@ func (tx *Tx) writeChunksSequential(r io.Reader, codec format.Codec, level uint8
 			CompSize:    uint32(len(rec) - 16),
 			CRC32Raw:    crc,
 		})
-		rawOff += uint64(n)
+		rawOff = nextRawOff
 		if readErr == io.ErrUnexpectedEOF {
 			break
 		}
@@ -661,13 +665,19 @@ func (tx *Tx) writeChunksParallel(r io.Reader, codec format.Codec, level uint8, 
 				break
 			}
 			raw := buf[:n]
-			if maxEntry > 0 && rawOff+uint64(n) > maxEntry {
+			nextRawOff, ok := addUint64Checked(rawOff, uint64(n))
+			if !ok {
+				bufPool.Put(buf)
+				produceErr = ErrLimitExceeded
+				break
+			}
+			if maxEntry > 0 && nextRawOff > maxEntry {
 				bufPool.Put(buf)
 				produceErr = ErrLimitExceeded
 				break
 			}
 			jobs <- chunkJob{index: idx, rawOff: rawOff, raw: raw}
-			rawOff += uint64(n)
+			rawOff = nextRawOff
 			idx++
 			if readErr == io.ErrUnexpectedEOF {
 				break

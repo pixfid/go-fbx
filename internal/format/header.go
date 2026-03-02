@@ -73,18 +73,42 @@ func UnmarshalHeaderV1(b []byte) (HeaderV1, error) {
 	}
 	var h HeaderV1
 	r := bytes.NewReader(b)
-	_ = binary.Read(r, binary.LittleEndian, &h.Magic)
-	_ = binary.Read(r, binary.LittleEndian, &h.Version)
-	_ = binary.Read(r, binary.LittleEndian, &h.HeaderSize)
-	_ = binary.Read(r, binary.LittleEndian, &h.Flags)
-	_ = binary.Read(r, binary.LittleEndian, &h.UUID)
-	_ = binary.Read(r, binary.LittleEndian, &h.CreatedUnix)
-	_ = binary.Read(r, binary.LittleEndian, &h.DirOffset)
-	_ = binary.Read(r, binary.LittleEndian, &h.DirSize)
-	_ = binary.Read(r, binary.LittleEndian, &h.DirCRC32)
-	_ = binary.Read(r, binary.LittleEndian, &h.JournalOffset)
-	_ = binary.Read(r, binary.LittleEndian, &h.JournalSize)
-	_ = binary.Read(r, binary.LittleEndian, &h.Reserved)
+	if err := binary.Read(r, binary.LittleEndian, &h.Magic); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.Version); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.HeaderSize); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.Flags); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.UUID); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.CreatedUnix); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.DirOffset); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.DirSize); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.DirCRC32); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.JournalOffset); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.JournalSize); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
+	if err := binary.Read(r, binary.LittleEndian, &h.Reserved); err != nil {
+		return HeaderV1{}, ErrInvalidHeader
+	}
 	if h.Magic != MagicHeader || h.Version != VersionV1 || h.HeaderSize != HeaderSize {
 		return HeaderV1{}, ErrInvalidHeader
 	}

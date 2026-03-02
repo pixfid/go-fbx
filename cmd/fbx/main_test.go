@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/pixfid/go-fbx/fbx"
+	"github.com/pixfid/go-fbx/internal/format"
 )
 
 func TestParseCodec(t *testing.T) {
@@ -53,6 +55,43 @@ func TestBuildLimitOptions(t *testing.T) {
 	_, err = buildLimitOptions(0, uint64(^uint32(0))+1)
 	if err == nil {
 		t.Fatalf("expected error for too large chunk limit")
+	}
+}
+
+func TestInspectContainerCodecsRejectsOversizedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oversized-inspect.fbx")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	h := format.HeaderV1{
+		Magic:      format.MagicHeader,
+		Version:    format.VersionV1,
+		HeaderSize: format.HeaderSize,
+		DirOffset:  format.HeaderSize,
+		DirSize:    maxInspectDirectoryBlobSize + 1,
+	}
+	hb, err := h.MarshalBinary()
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("marshal header: %v", err)
+	}
+	if _, err := f.WriteAt(hb, 0); err != nil {
+		_ = f.Close()
+		t.Fatalf("write header: %v", err)
+	}
+	if err := f.Truncate(int64(h.DirOffset + h.DirSize)); err != nil {
+		_ = f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	_, err = inspectContainerCodecs(path)
+	if !errors.Is(err, fbx.ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
 }
 

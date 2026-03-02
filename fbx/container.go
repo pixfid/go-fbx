@@ -178,6 +178,10 @@ func Create(path string, opts *Options) (*Container, error) {
 }
 
 func (c *Container) Close() error {
+	if !c.txMu.TryLock() {
+		return errors.New("fbx: transaction active")
+	}
+	defer c.txMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.file == nil {
@@ -219,11 +223,15 @@ func (c *Container) OpenReader(path string) (io.ReadCloser, error) {
 		return nil, ErrPathInvalid
 	}
 	c.mu.RLock()
+	file := c.file
 	e, ok := c.entries[norm]
 	verifyCRC := c.opts.StrictVerify
 	maxEntry := c.opts.MaxEntrySize
 	maxChunk := c.opts.MaxChunkSize
 	c.mu.RUnlock()
+	if file == nil {
+		return nil, errors.New("fbx: container closed")
+	}
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -231,7 +239,7 @@ func (c *Container) OpenReader(path string) (io.ReadCloser, error) {
 		return nil, ErrLimitExceeded
 	}
 	return &entryReader{
-		f:         c.file,
+		f:         file,
 		chunks:    append([]format.ChunkRefV1(nil), e.Chunks...),
 		verifyCRC: verifyCRC,
 		maxEntry:  maxEntry,
@@ -365,6 +373,7 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 
 	c.mu.RLock()
 	h := c.header
+	maxChunk := c.opts.MaxChunkSize
 	entries := make([]format.EntryV1, 0, len(c.entries))
 	for _, e := range c.entries {
 		entries = append(entries, cloneEntry(e))
@@ -392,6 +401,10 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 		}
 		for _, ref := range refs {
 			report.ChunksChecked++
+			if maxChunk > 0 && (ref.RawSize > maxChunk || ref.CompSize > maxChunk) {
+				report.Errors = append(report.Errors, ErrLimitExceeded)
+				continue
+			}
 			rec, err := format.ReadChunkRecordAtOptLimited(c.file, int64(ref.ChunkOffset), true, ref.RawSize, ref.CompSize)
 			if err != nil {
 				report.Errors = append(report.Errors, mapErr(err))
@@ -437,7 +450,7 @@ func (r *entryReader) Read(p []byte) (int, error) {
 			// we return the already-accumulated bytes and defer the error to the
 			// next Read call (which will retry with the same r.idx).
 			ref := r.chunks[r.idx]
-			if r.maxChunk > 0 && ref.RawSize > r.maxChunk {
+			if r.maxChunk > 0 && (ref.RawSize > r.maxChunk || ref.CompSize > r.maxChunk) {
 				if n > 0 {
 					return n, nil
 				}

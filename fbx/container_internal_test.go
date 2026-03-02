@@ -293,6 +293,18 @@ func TestEntryReaderRejectsChunkHeaderCompSizeMismatchBeforePayloadRead(t *testi
 	}
 }
 
+func TestEntryReaderHonorsCompressedChunkLimit(t *testing.T) {
+	r := &entryReader{
+		f:        bytes.NewReader([]byte{}),
+		chunks:   []format.ChunkRefV1{{ChunkOffset: 0, RawSize: 1, CompSize: 10}},
+		maxChunk: 4,
+	}
+	buf := make([]byte, 1)
+	if _, err := r.Read(buf); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded for comp-size limit, got %v", err)
+	}
+}
+
 func TestReadAllPropagatesError(t *testing.T) {
 	errBoom := errors.New("boom")
 	r := io.MultiReader(bytes.NewBufferString("ok"), errReader{err: errBoom})
@@ -305,3 +317,45 @@ func TestReadAllPropagatesError(t *testing.T) {
 type errReader struct{ err error }
 
 func (e errReader) Read(_ []byte) (int, error) { return 0, e.err }
+
+func TestCloseReturnsErrorWhileTransactionActive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "close-waits.fbx")
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	tx, err := c.Begin()
+	if err != nil {
+		_ = c.Close()
+		t.Fatalf("begin: %v", err)
+	}
+
+	if err := c.Close(); err == nil {
+		t.Fatalf("expected close to fail while tx active")
+	}
+
+	tx.Rollback()
+	if err := c.Close(); err != nil {
+		t.Fatalf("close failed after rollback: %v", err)
+	}
+}
+
+func TestOpenReaderAfterCloseReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reader-after-close.fbx")
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a", bytes.NewReader([]byte("x")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := c.OpenReader("a"); err == nil {
+		t.Fatalf("expected error from OpenReader on closed container")
+	}
+}

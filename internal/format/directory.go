@@ -96,10 +96,21 @@ func DecodeDirectory(blob []byte, expectedCRC uint32, expectedSize uint64) (Dire
 	var entryCount uint32
 	var flags uint32
 	var buildUnix uint64
-	_ = binary.Read(r, binary.LittleEndian, &magic)
-	_ = binary.Read(r, binary.LittleEndian, &entryCount)
-	_ = binary.Read(r, binary.LittleEndian, &flags)
-	_ = binary.Read(r, binary.LittleEndian, &buildUnix)
+	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+	if err := binary.Read(r, binary.LittleEndian, &entryCount); err != nil {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+	if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+	if err := binary.Read(r, binary.LittleEndian, &buildUnix); err != nil {
+		return DirectoryV1{}, ErrInvalidDir
+	}
+	if magic != MagicDir {
+		return DirectoryV1{}, ErrInvalidDir
+	}
 	if flags != 0 {
 		return DirectoryV1{}, ErrInvalidDir
 	}
