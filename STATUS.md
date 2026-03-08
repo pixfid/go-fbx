@@ -1,9 +1,9 @@
 # FBX RFC Implementation Status
 
-Last updated: 2026-02-22
+Last updated: 2026-03-09
 
 ## Overall
-- Implemented: core FBX v1 library + CLI + ZIP->FBX conversion + pack + verify + compatibility vectors + journal recovery.
+- Implemented: core FBX v1 library + CLI + ZIP->FBX conversion + pack + verify + compatibility vectors + journal recovery + v1 extension profile (`IDX1`) + legacy migration.
 - Test status: `go test ./...` passes.
 
 ## RFC Coverage Matrix
@@ -19,6 +19,8 @@ Last updated: 2026-02-22
 | §12 Mass Operations | Implemented | `RemoveMany`, `RemovePrefix`, `RemoveGlob`, `RemoveWhere`. |
 | §13 Compaction (`pack`) | Implemented | In-place and out-of-place pack via API/CLI. |
 | §14 Verification (`verify`) | Implemented | `dir`, `sample`, `all` modes in API/CLI. |
+| v1 Extension profile (`HAS_DIR_INDEX`, required-features) | Implemented | `IDX1` commit/open path and header extension fields are active in writer/reader. |
+| Legacy migration (`migrate`) | Implemented | Append-only metadata migration without payload re-encode; API + CLI coverage. |
 | §15 Error handling | Implemented | Public typed errors (`ErrNotFound`, `ErrCRCMismatch`, etc.). |
 | §16 Security considerations | Mostly implemented | Path validation, streaming I/O, configurable read/write limits (`MaxEntrySize`, `MaxChunkSize`), ZSTD decoder memory/window limits. |
 | §18 Reference architecture/API/CLI | Mostly implemented | Core API and major CLI commands are present. |

@@ -29,6 +29,7 @@ go run ./cmd/fbx list books.fbx
 go run ./cmd/fbx stat --json books.fbx books/123.fb2
 go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx
+go run ./cmd/fbx migrate --dry-run --verify-source all books.fbx
 go run ./cmd/fbx extract -o sample.fb2 books.fbx books/123.fb2
 go run ./cmd/fbx set-meta --meta-json '{"source":"flibusta"}' books.fbx books/123.fb2
 go run ./cmd/fbx pack --codec zstd books.fbx
@@ -46,4 +47,6 @@ _ = c.Close()
 - `docs/CLI.md` — справочник CLI и примеры.
 - `docs/API.md` — публичный Go API и семантика опций.
 - `docs/FORMAT_AND_RECOVERY.md` — модель формата на диске, journal и recovery.
+- `docs/V1_EXTENSION_SPEC.md` — профиль несовместимого расширения `v1` (`IDX1`, required-features, commit contract).
+- `docs/MIGRATION.md` — поток миграции legacy -> extension и гарантии сохранения данных.
 - `docs/DEVELOPMENT.md` — тесты, векторы, бенчмарки и workflow разработки.

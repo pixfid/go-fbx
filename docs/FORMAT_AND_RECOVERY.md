@@ -2,6 +2,14 @@
 
 This implementation follows `FBX_RFC_BinarySpec_GoDoc_v1.md`.
 
+Note: baseline `v1` is still documented here, but current `go-fbx` writers use the
+incompatible `v1` extension profile (`HAS_JOURNAL` semantics, backup-header contract,
+`IDX1` lazy directory index, required features contract).
+
+See:
+- [V1_EXTENSION_SPEC.md](./V1_EXTENSION_SPEC.md)
+- [MIGRATION.md](./MIGRATION.md)
+
 ## On-Disk Model
 - Header (`HDR1`) at offset `0`.
 - Reserved fixed backup header slot at offset `128` (`HeaderSize`).
@@ -15,11 +23,12 @@ Commits never rewrite existing chunk payloads. The latest header points to the n
 
 ## Transaction Commit Flow
 1. Encode and append new directory blob.
-2. Build updated header.
-3. Append `JNL1` journal record (header snapshot + CRC).
-4. Append `BKP1` backup record (header snapshot + CRC).
-5. Write fixed backup header (offset `128`) when slot is enabled.
-6. Write primary header at offset `0`.
+2. Build and append `IDX1` for the active directory.
+3. Build updated header (extension flags + reserved pointer fields).
+4. Append `JNL1` journal record (header snapshot + CRC).
+5. Append `BKP1` backup record (header snapshot + CRC).
+6. Write fixed backup header (offset `128`) when slot is enabled.
+7. Write primary header at offset `0`.
 
 With `SyncOnCommit=true` (default), `fsync` is executed between critical stages.
 

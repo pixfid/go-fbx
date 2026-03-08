@@ -3,6 +3,7 @@ package fbx
 import (
 	"bufio"
 	"bytes"
+	"hash/crc32"
 	"io"
 	"path"
 	"path/filepath"
@@ -249,12 +250,6 @@ func (tx *Tx) Commit() error {
 		tx.release()
 		return err
 	}
-	if tx.c.opts.SyncOnCommit {
-		if err := tx.c.file.Sync(); err != nil {
-			tx.release()
-			return err
-		}
-	}
 
 	tx.c.mu.RLock()
 	h := tx.c.header
@@ -266,11 +261,42 @@ func (tx *Tx) Commit() error {
 	h.DirOffset = dirOffset
 	h.DirSize = uint64(len(dirBlob))
 	h.DirCRC32 = crc
+	generation := readHeaderGeneration(h)
+	if generation < ^uint64(0) {
+		generation++
+	}
+	idxBlob, err := buildDirIndexBlob(dirBlob, dirOffset, crc, generation)
+	if err != nil {
+		tx.release()
+		return err
+	}
+	idxOffset := tx.appendOffset
+	tx.appendOffset, err = appendAt(tx.c.file, tx.appendOffset, idxBlob)
+	if err != nil {
+		tx.release()
+		return err
+	}
+	if tx.c.opts.SyncOnCommit {
+		if err := tx.c.file.Sync(); err != nil {
+			tx.release()
+			return err
+		}
+	}
 
 	h.Flags |= format.HeaderFlagHasJournal
 	h.Flags |= format.HeaderFlagHasBackup
+	h.Flags |= format.HeaderFlagHasDirIndex
+	h.Flags |= format.HeaderFlagHasRequiredFeatures
 	h.JournalOffset = tx.appendOffset
 	h.JournalSize = journalRecordSize
+	markHeaderV1ExtensionLayout(&h)
+	writeHeaderGeneration(&h, generation)
+	writeHeaderDirIndexPointer(&h, dirIndexPointer{
+		offset: idxOffset,
+		size:   uint64(len(idxBlob)),
+		crc32:  crc32.ChecksumIEEE(idxBlob),
+	})
+	writeHeaderRequiredFeaturesLow(&h, requiredFeaturesSupported)
 	headBuf, err := h.MarshalBinary()
 	if err != nil {
 		tx.release()
@@ -304,7 +330,7 @@ func (tx *Tx) Commit() error {
 	}
 
 	// Fixed backup header slot at offset 128 for containers created with the reserved slot layout.
-	if tx.c.header.Reserved[0] == 1 {
+	if headerHasFixedBackupSlot(h) {
 		if _, err := tx.c.file.WriteAt(headBuf, fixedBackupOffset); err != nil {
 			tx.release()
 			return err

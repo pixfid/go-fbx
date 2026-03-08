@@ -35,6 +35,8 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
   - `VerifySampledChunks`
   - `VerifyAllChunks`
 - `Pack(inPath, outPath, opts)` пересобирает компактный контейнер.
+- `Migrate(path, opts)` выполняет append-only апгрейд legacy-контейнера к расширенному layout `v1` (`IDX1` + required feature contract) без перепаковки payload.
+  - runbook миграции: [MIGRATION.md](./MIGRATION.md)
 
 ## Обновление только метаданных
 - `SetMeta(path, meta)` обновляет метаданные одной записи без перепаковки payload-чанков.
@@ -49,7 +51,8 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
 ## Обработка ошибок
 Используйте `errors.Is` с экспортируемыми ошибками:
 - `ErrNotFound`, `ErrAlreadyExists`, `ErrPathInvalid`
-- `ErrInvalidFormat`, `ErrCRCMismatch`, `ErrUnsupportedCodec`, `ErrLimitExceeded`
+- `ErrInvalidFormat`, `ErrCRCMismatch`, `ErrUnsupportedFeature`, `ErrUnsupportedCodec`, `ErrLimitExceeded`
+- `ErrMigrationPreflightFailed`, `ErrMigrationInterrupted`, `ErrMigrationVerificationFailed`
 
 ## ZIP-конвертация
 Используйте `ConvertZIPToFBX(zipPath, fbxPath, opts)` для импорта больших ZIP-архивов с опциональными метаданными (`--meta`, `MetaFile`) и callback прогресса.

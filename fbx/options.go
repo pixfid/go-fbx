@@ -11,13 +11,13 @@ const (
 )
 
 type Options struct {
-	ChunkSizeText            int
-	ChunkSizeBin             int
-	DefaultCodec             Codec
-	DefaultLevel             int
-	MaxWorkers               int
-	MaxEntrySize             uint64
-	MaxChunkSize             uint32
+	ChunkSizeText int
+	ChunkSizeBin  int
+	DefaultCodec  Codec
+	DefaultLevel  int
+	MaxWorkers    int
+	MaxEntrySize  uint64
+	MaxChunkSize  uint32
 
 	// The four options below default to true. Because Go zero-value is false,
 	// passing Options{SomeField: x} would unintentionally disable them.
@@ -106,6 +106,14 @@ type PackProgress struct {
 	EntriesDone  int
 	EntriesTotal int
 	EntryPath    string
+}
+
+type MigrateOptions struct {
+	// VerifySource controls source validation before migration.
+	// Default is VerifyDirectoryOnly.
+	VerifySource VerifyMode
+	// VerifyTarget enables post-migration full chunk verification on the target snapshot.
+	VerifyTarget bool
 }
 
 type EntryInfo struct {

@@ -14,6 +14,7 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 - `replace-text` — bulk byte-string replacement in matching entries.
 - `extract` — stream one entry out.
 - `verify` — integrity validation.
+- `migrate` — append-only upgrade of legacy containers to `v1` extension layout.
 
 ## Global Semantics
 - Exit codes:
@@ -213,6 +214,7 @@ Flags:
 | Flag | Default | What it does | Why use it |
 |---|---:|---|---|
 | `--json` | `false` | Emit full JSON report. | Parse with scripts/tools. |
+| `--format auto\|v1` | `auto` | Enforce/inspect active snapshot format. | Fail early on wrong format assumptions. |
 
 What it reports:
 - Entry/chunk totals.
@@ -223,6 +225,7 @@ What it reports:
 - `dead_bytes`: estimated obsolete bytes left after replacements/removals.
 - `churn_ops`: number of replace/remove-like operations that created obsolete bytes.
 - `file_size`: current container size in bytes.
+- `format`: active format (`v1`).
 
 ## `set-meta`
 Syntax:
@@ -326,6 +329,7 @@ Flags:
 | Flag | Default | What it does | Why use it |
 |---|---:|---|---|
 | `--mode dir\|sample\|all` | `dir` | Verification depth. | Trade speed vs confidence. |
+| `--format auto\|v1` | `auto` | Enforce expected active format before verify. | Prevent verifying unexpected snapshot type. |
 
 Modes:
 - `dir`: header + directory checks only.
@@ -333,3 +337,23 @@ Modes:
 - `all`: directory + all chunks.
 
 Output: `entries_checked=<n> chunks_checked=<n> errors=<n>`.
+
+## `migrate`
+Syntax:
+```bash
+fbx migrate [flags] <container.fbx>
+```
+
+Flags:
+
+| Flag | Default | What it does | Why use it |
+|---|---:|---|---|
+| `--verify-source dir\|sample\|all` | `dir` | Preflight verification depth for source snapshot. | Catch corruption before migration write. |
+| `--verify-target` | `true` | Run full verify (`all`) after migration commit. | Confirm migrated snapshot integrity. |
+| `--dry-run` | `false` | Perform preflight verify only, do not write container. | Validate migration readiness in CI/script pipelines. |
+
+Output:
+- normal run: `migration=ok`
+- dry-run: `migration_dry_run=ok`
+
+See also: [MIGRATION.md](./MIGRATION.md).

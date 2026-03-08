@@ -15,12 +15,13 @@ import (
 )
 
 type Container struct {
-	file    *os.File
-	opts    Options
-	txMu    sync.Mutex
-	mu      sync.RWMutex
-	header  format.HeaderV1
-	entries map[string]format.EntryV1
+	file          *os.File
+	opts          Options
+	txMu          sync.Mutex
+	mu            sync.RWMutex
+	formatVersion uint16
+	header        format.HeaderV1
+	entries       map[string]format.EntryV1
 }
 
 const maxDirectoryBlobSize uint64 = 1 << 30 // 1 GiB hard cap for directory blob reads.
@@ -45,7 +46,7 @@ func Open(path string, opts *Options) (*Container, error) {
 	if err == nil {
 		entries, err := readEntriesByHeader(f, h)
 		if err == nil {
-			return &Container{file: f, opts: o, header: h, entries: entries}, nil
+			return &Container{file: f, opts: o, formatVersion: format.VersionV1, header: h, entries: entries}, nil
 		}
 		openErr = mapErr(err)
 		if !shouldAttemptOpenRecovery(openErr) {
@@ -84,6 +85,7 @@ func Open(path string, opts *Options) (*Container, error) {
 			return nil, fatal
 		}
 		if c != nil {
+			c.formatVersion = format.VersionV1
 			return c, nil
 		}
 	} else if openErr == nil {
@@ -98,6 +100,7 @@ func Open(path string, opts *Options) (*Container, error) {
 			return nil, fatal
 		}
 		if c != nil {
+			c.formatVersion = format.VersionV1
 			return c, nil
 		}
 	} else if openErr == nil {
@@ -112,6 +115,7 @@ func Open(path string, opts *Options) (*Container, error) {
 			return nil, fatal
 		}
 		if c != nil {
+			c.formatVersion = format.VersionV1
 			return c, nil
 		}
 	} else if openErr == nil {
@@ -140,7 +144,7 @@ func Create(path string, opts *Options) (*Container, error) {
 	h.Version = format.VersionV1
 	h.HeaderSize = format.HeaderSize
 	h.CreatedUnix = uint64(time.Now().Unix())
-	h.Reserved[0] = 1 // fixed-backup slot is reserved in this layout
+	markHeaderV1ExtensionLayout(&h)
 	_, _ = rand.Read(h.UUID[:])
 
 	headBuf, _ := h.MarshalBinary()
@@ -174,7 +178,7 @@ func Create(path string, opts *Options) (*Container, error) {
 		}
 	}
 
-	return &Container{file: f, opts: o, header: h, entries: map[string]format.EntryV1{}}, nil
+	return &Container{file: f, opts: o, formatVersion: format.VersionV1, header: h, entries: map[string]format.EntryV1{}}, nil
 }
 
 func (c *Container) Close() error {
@@ -339,6 +343,10 @@ func (c *Container) Remove(path string) error {
 
 func (c *Container) Begin() (*Tx, error) {
 	c.txMu.Lock()
+	if c.formatVersion != format.VersionV1 {
+		c.txMu.Unlock()
+		return nil, ErrUnsupportedFeature
+	}
 	// c.file is protected by c.mu; read it under the same lock used by Close().
 	c.mu.RLock()
 	if c.file == nil {
@@ -373,6 +381,7 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 
 	c.mu.RLock()
 	h := c.header
+	formatVersion := c.formatVersion
 	maxChunk := c.opts.MaxChunkSize
 	entries := make([]format.EntryV1, 0, len(c.entries))
 	for _, e := range c.entries {
@@ -380,14 +389,16 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 	}
 	c.mu.RUnlock()
 
-	dirBlob, err := readDirectoryBlobByHeader(c.file, h)
-	if err != nil {
-		report.Errors = append(report.Errors, err)
-		return report, errors.Join(report.Errors...)
-	}
-	if _, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize); err != nil {
-		report.Errors = append(report.Errors, mapErr(err))
-		return report, errors.Join(report.Errors...)
+	if formatVersion == format.VersionV1 {
+		dirBlob, err := readDirectoryBlobByHeader(c.file, h)
+		if err != nil {
+			report.Errors = append(report.Errors, err)
+			return report, errors.Join(report.Errors...)
+		}
+		if _, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize); err != nil {
+			report.Errors = append(report.Errors, mapErr(err))
+			return report, errors.Join(report.Errors...)
+		}
 	}
 	if opts.Mode == VerifyDirectoryOnly {
 		return report, nil
@@ -588,29 +599,61 @@ func validateHeaderDirectory(f *os.File, h format.HeaderV1) error {
 }
 
 func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.EntryV1, error) {
+	if err := validateHeaderRequiredFeatures(h); err != nil {
+		return nil, err
+	}
 	dirBlob, err := readDirectoryBlobByHeader(f, h)
 	if err != nil {
-		return nil, mapErr(err)
-	}
-	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
-	if err != nil {
-		return nil, mapErr(err)
+		return nil, err
 	}
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if err := validateDirectoryChunkOffsets(dir, uint64(st.Size())); err != nil {
+	fileSize := uint64(st.Size())
+
+	var entries map[string]format.EntryV1
+	if idx, ok, idxErr := maybeReadDirIndexByHeader(f, h, fileSize); idxErr != nil {
+		return nil, idxErr
+	} else if ok {
+		entries, err = readEntriesByDirIndex(dirBlob, h, idx)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		dir, derr := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+		if derr != nil {
+			return nil, mapErr(derr)
+		}
+		entries = make(map[string]format.EntryV1, len(dir.Entries))
+		for _, e := range dir.Entries {
+			if _, ok := entries[e.Path]; ok {
+				return nil, ErrInvalidFormat
+			}
+			entries[e.Path] = cloneEntry(e)
+		}
+	}
+
+	if err := validateEntriesChunkOffsets(entries, fileSize); err != nil {
 		return nil, err
 	}
-	entries := make(map[string]format.EntryV1, len(dir.Entries))
-	for _, e := range dir.Entries {
-		if _, ok := entries[e.Path]; ok {
-			return nil, ErrInvalidFormat
-		}
-		entries[e.Path] = cloneEntry(e)
-	}
 	return entries, nil
+}
+
+func validateEntriesChunkOffsets(entries map[string]format.EntryV1, fileSize uint64) error {
+	for _, e := range entries {
+		for _, ref := range e.Chunks {
+			chunkEnd, ok := addUint64Checked(ref.ChunkOffset, 16)
+			if !ok {
+				return ErrInvalidFormat
+			}
+			chunkEnd, ok = addUint64Checked(chunkEnd, uint64(ref.CompSize))
+			if !ok || chunkEnd > fileSize {
+				return ErrInvalidFormat
+			}
+		}
+	}
+	return nil
 }
 
 func readDirectoryBlobByHeader(f *os.File, h format.HeaderV1) ([]byte, error) {

@@ -35,6 +35,8 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
   - `VerifySampledChunks`
   - `VerifyAllChunks`
 - `Pack(inPath, outPath, opts)` rebuilds a compact container.
+- `Migrate(path, opts)` performs append-only upgrade of legacy containers to the `v1` extension layout (`IDX1` + required feature contract) without payload re-encode.
+  - migration runbook: [MIGRATION.md](./MIGRATION.md)
 
 ## Metadata-Only Updates
 - `SetMeta(path, meta)` updates one entry metadata payload without rewriting entry chunks.
@@ -49,7 +51,8 @@ if err := c.Extract("books/a.fb2", &out); err != nil {
 ## Error Handling
 Use `errors.Is` against exported errors:
 - `ErrNotFound`, `ErrAlreadyExists`, `ErrPathInvalid`
-- `ErrInvalidFormat`, `ErrCRCMismatch`, `ErrUnsupportedCodec`, `ErrLimitExceeded`
+- `ErrInvalidFormat`, `ErrCRCMismatch`, `ErrUnsupportedFeature`, `ErrUnsupportedCodec`, `ErrLimitExceeded`
+- `ErrMigrationPreflightFailed`, `ErrMigrationInterrupted`, `ErrMigrationVerificationFailed`
 
 ## ZIP Conversion
 Use `ConvertZIPToFBX(zipPath, fbxPath, opts)` to import large ZIP archives with optional metadata (`--meta`, `MetaFile`) and progress callback.

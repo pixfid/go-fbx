@@ -61,6 +61,8 @@ func main() {
 		os.Exit(runExtract(os.Args[2:]))
 	case "verify":
 		os.Exit(runVerify(os.Args[2:]))
+	case "migrate":
+		os.Exit(runMigrate(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -81,13 +83,14 @@ Usage:
   fbx rm [--prefix p] [--glob g] [--contains s] [--min-size n] [--max-size n] <container.fbx> [entry ...]
   fbx find [--prefix p] [--glob g] [--contains s] <container.fbx>
   fbx stat [--json] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
-  fbx info [--json] <container.fbx>
+  fbx info [--json] [--format auto|v1] <container.fbx>
   fbx set-meta [--meta-json json|--meta-file file.json] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
   fbx set-meta-many --meta-file file.json [--ignore-missing] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx replace-text --find old --replace new [--prefix p] [--glob g] [--dry-run] [--codec store|zstd|lz4] [--level n] [--chunk-size n] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx>
   fbx list <container.fbx>
   fbx extract [-o output] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
-  fbx verify [--mode dir|sample|all] <container.fbx>
+  fbx verify [--mode dir|sample|all] [--format auto|v1] <container.fbx>
+  fbx migrate [--verify-source dir|sample|all] [--verify-target] [--dry-run] <container.fbx>
 `)
 }
 
@@ -261,6 +264,8 @@ func runList(args []string) int {
 }
 
 type codecReport struct {
+	Format       string         `json:"format"`
+	Generation   uint64         `json:"generation,omitempty"`
 	EntriesTotal int            `json:"entries_total"`
 	ChunksTotal  int            `json:"chunks_total"`
 	ChunkCounts  map[string]int `json:"chunk_counts"`
@@ -275,6 +280,7 @@ type codecReport struct {
 func runInfo(args []string) int {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output as JSON")
+	formatReq := fs.String("format", "auto", "container format filter: auto|v1")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -282,7 +288,12 @@ func runInfo(args []string) int {
 		fmt.Fprintln(os.Stderr, "info requires <container.fbx>")
 		return 2
 	}
-	report, err := inspectContainerCodecs(fs.Arg(0))
+	req, err := parseFormatRequest(*formatReq)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	report, err := inspectContainerCodecs(fs.Arg(0), req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -291,6 +302,10 @@ func runInfo(args []string) int {
 		b, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Println(string(b))
 		return 0
+	}
+	fmt.Printf("format=%s\n", report.Format)
+	if report.Generation > 0 {
+		fmt.Printf("generation=%d\n", report.Generation)
 	}
 	fmt.Printf("entries_total=%d\n", report.EntriesTotal)
 	fmt.Printf("chunks_total=%d\n", report.ChunksTotal)
@@ -313,6 +328,17 @@ func runInfo(args []string) int {
 	return 0
 }
 
+func parseFormatRequest(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto":
+		return "auto", nil
+	case "v1":
+		return "v1", nil
+	default:
+		return "", fmt.Errorf("--format must be auto|v1")
+	}
+}
+
 func sortedLevelCountKeys(m map[string]int) []string {
 	if len(m) == 0 {
 		return nil
@@ -333,7 +359,7 @@ func sortedLevelCountKeys(m map[string]int) []string {
 	return out
 }
 
-func inspectContainerCodecs(containerPath string) (codecReport, error) {
+func inspectContainerCodecs(containerPath, formatReq string) (codecReport, error) {
 	f, err := os.Open(containerPath)
 	if err != nil {
 		return codecReport{}, err
@@ -343,7 +369,12 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 	if err != nil {
 		return codecReport{}, err
 	}
-	h, dir, err := readHeaderAndDirectoryForInspect(f, uint64(st.Size()))
+	fileSize := uint64(st.Size())
+	if formatReq != "auto" && formatReq != "v1" {
+		return codecReport{}, fmt.Errorf("container format mismatch: expected %s, got v1", formatReq)
+	}
+
+	h, dir, err := readHeaderAndDirectoryForInspect(f, fileSize)
 	if err != nil {
 		return codecReport{}, err
 	}
@@ -398,6 +429,7 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 		levelSummary = "mixed(" + strings.Join(usedLevels, ",") + ")"
 	}
 	return codecReport{
+		Format:       "v1",
 		EntriesTotal: len(dir.Entries),
 		ChunksTotal:  totalChunks,
 		ChunkCounts:  counts,
@@ -406,60 +438,8 @@ func inspectContainerCodecs(containerPath string) (codecReport, error) {
 		LevelCounts:  levelCounts,
 		DeadBytes:    deadBytes,
 		ChurnOps:     churnOps,
-		FileSize:     uint64(st.Size()),
+		FileSize:     fileSize,
 	}, nil
-}
-
-func inspectEntryCodecs(containerPath string) (map[string]string, error) {
-	f, err := os.Open(containerPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	_, dir, err := readHeaderAndDirectoryForInspect(f, uint64(st.Size()))
-	if err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]string, len(dir.Entries))
-	for _, e := range dir.Entries {
-		counts := map[string]int{"store": 0, "zstd": 0, "lz4": 0}
-		for _, ref := range e.Chunks {
-			codec, err := readChunkCodecAt(f, int64(ref.ChunkOffset))
-			if err != nil {
-				return nil, err
-			}
-			switch codec {
-			case format.CodecStore:
-				counts["store"]++
-			case format.CodecZstd:
-				counts["zstd"]++
-			case format.CodecLZ4:
-				counts["lz4"]++
-			default:
-				counts[fmt.Sprintf("unknown_%d", codec)]++
-			}
-		}
-		used := make([]string, 0, len(counts))
-		for k, n := range counts {
-			if n > 0 {
-				used = append(used, k)
-			}
-		}
-		sort.Strings(used)
-		summary := "none"
-		if len(used) == 1 {
-			summary = used[0]
-		} else if len(used) > 1 {
-			summary = "mixed(" + strings.Join(used, ",") + ")"
-		}
-		out[e.Path] = summary
-	}
-	return out, nil
 }
 
 func readHeaderAndDirectoryForInspect(f *os.File, fileSize uint64) (format.HeaderV1, format.DirectoryV1, error) {
@@ -777,7 +757,7 @@ func codecName(c fbx.Codec) string {
 }
 
 func containerMatchesPackParams(containerPath string, codec fbx.Codec, level int) (bool, error) {
-	report, err := inspectContainerCodecs(containerPath)
+	report, err := inspectContainerCodecs(containerPath, "auto")
 	if err != nil {
 		return false, err
 	}
@@ -1537,12 +1517,22 @@ func runExtract(args []string) int {
 func runVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	mode := fs.String("mode", "dir", "verification mode: dir|sample|all")
+	formatReq := fs.String("format", "auto", "container format filter: auto|v1")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "verify requires <container.fbx>")
 		return 2
+	}
+	req, err := parseFormatRequest(*formatReq)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if req != "auto" && req != "v1" {
+		fmt.Fprintf(os.Stderr, "container format mismatch: expected %s, got v1\n", req)
+		return 1
 	}
 	c, err := fbx.Open(fs.Arg(0), nil)
 	if err != nil {
@@ -1551,18 +1541,12 @@ func runVerify(args []string) int {
 	}
 	defer c.Close()
 
-	v := &fbx.VerifyOptions{Mode: fbx.VerifyDirectoryOnly}
-	switch *mode {
-	case "dir":
-		v.Mode = fbx.VerifyDirectoryOnly
-	case "sample":
-		v.Mode = fbx.VerifySampledChunks
-	case "all":
-		v.Mode = fbx.VerifyAllChunks
-	default:
-		fmt.Fprintln(os.Stderr, "--mode must be dir|sample|all")
+	vmode, err := parseVerifyModeFlag(*mode, "--mode")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
+	v := &fbx.VerifyOptions{Mode: vmode}
 	report, err := c.Verify(v)
 	if report != nil {
 		fmt.Printf("entries_checked=%d chunks_checked=%d errors=%d\n", report.EntriesChecked, report.ChunksChecked, len(report.Errors))
@@ -1572,4 +1556,57 @@ func runVerify(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runMigrate(args []string) int {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	verifySource := fs.String("verify-source", "dir", "source verification mode: dir|sample|all")
+	verifyTarget := fs.Bool("verify-target", true, "verify target with full chunk scan after migration")
+	dryRun := fs.Bool("dry-run", false, "validate source and report without writing")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "migrate requires <container.fbx>")
+		return 2
+	}
+	mode, err := parseVerifyModeFlag(*verifySource, "--verify-source")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	path := fs.Arg(0)
+	if *dryRun {
+		c, err := fbx.Open(path, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer c.Close()
+		if _, err := c.Verify(&fbx.VerifyOptions{Mode: mode}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Println("migration_dry_run=ok")
+		return 0
+	}
+	if err := fbx.Migrate(path, &fbx.MigrateOptions{VerifySource: mode, VerifyTarget: *verifyTarget}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Println("migration=ok")
+	return 0
+}
+
+func parseVerifyModeFlag(raw, flagName string) (fbx.VerifyMode, error) {
+	switch raw {
+	case "dir":
+		return fbx.VerifyDirectoryOnly, nil
+	case "sample":
+		return fbx.VerifySampledChunks, nil
+	case "all":
+		return fbx.VerifyAllChunks, nil
+	default:
+		return 0, fmt.Errorf("%s must be dir|sample|all", flagName)
+	}
 }

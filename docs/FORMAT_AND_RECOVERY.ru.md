@@ -2,6 +2,14 @@
 
 Эта реализация следует `FBX_RFC_BinarySpec_GoDoc_v1.md`.
 
+Примечание: здесь описан baseline `v1`, но текущие writer'ы `go-fbx` работают с
+несовместимым профилем расширения `v1` (`HAS_JOURNAL`, backup-header contract,
+`IDX1` lazy parsing, required-features contract).
+
+См.:
+- [V1_EXTENSION_SPEC.md](./V1_EXTENSION_SPEC.md)
+- [MIGRATION.md](./MIGRATION.md)
+
 ## Модель на диске
 - Header (`HDR1`) по смещению `0`.
 - Зарезервированный фиксированный backup header по смещению `128` (`HeaderSize`).
@@ -15,11 +23,12 @@ Commit никогда не переписывает существующие pay
 
 ## Поток commit в транзакции
 1. Кодирование и дописывание нового directory blob.
-2. Построение обновлённого header.
-3. Дозапись `JNL1` journal record (snapshot header + CRC).
-4. Дозапись `BKP1` backup record (snapshot header + CRC).
-5. Запись fixed backup header (offset `128`), если слот включён.
-6. Запись primary header в offset `0`.
+2. Построение и дописывание `IDX1` для активного directory.
+3. Построение обновлённого header (extension-флаги + reserved pointer fields).
+4. Дозапись `JNL1` journal record (snapshot header + CRC).
+5. Дозапись `BKP1` backup record (snapshot header + CRC).
+6. Запись fixed backup header (offset `128`), если слот включён.
+7. Запись primary header в offset `0`.
 
 При `SyncOnCommit=true` (по умолчанию) между критическими этапами выполняется `fsync`.
 

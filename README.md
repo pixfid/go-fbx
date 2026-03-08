@@ -65,6 +65,7 @@ go run ./cmd/fbx convert-zip \
 ```bash
 go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx
+go run ./cmd/fbx migrate --dry-run --verify-source all books.fbx
 go run ./cmd/fbx list books.fbx
 go run ./cmd/fbx stat --json books.fbx books/123.fb2
 ```
@@ -83,8 +84,8 @@ go run ./cmd/fbx extract -o /tmp/123.fb2 books.fbx books/123.fb2
 
 ```bash
 go run ./cmd/fbx add --as books/new.fb2 books.fbx ./new.fb2
-go run ./cmd/fbx upsert --as books/new.fb2 books.fbx ./new-v2.fb2
-go run ./cmd/fbx replace --as books/new.fb2 books.fbx ./new-v3.fb2
+go run ./cmd/fbx upsert --as books/new.fb2 books.fbx ./new-2.fb2
+go run ./cmd/fbx replace --as books/new.fb2 books.fbx ./new-3.fb2
 ```
 
 ### 5. Metadata updates
@@ -258,4 +259,6 @@ if err := fbx.Pack("books.fbx", "books-compacted.fbx", &fbx.PackOptions{Codec: f
 - [docs/CLI.md](docs/CLI.md) - full command reference and examples.
 - [docs/API.md](docs/API.md) - public Go API and options.
 - [docs/FORMAT_AND_RECOVERY.md](docs/FORMAT_AND_RECOVERY.md) - on-disk model and recovery flow.
+- [docs/V1_EXTENSION_SPEC.md](docs/V1_EXTENSION_SPEC.md) - incompatible `v1` extension profile (`IDX1`, required features, commit contract).
+- [docs/MIGRATION.md](docs/MIGRATION.md) - legacy-to-extension migration flow and guarantees.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - tests, vectors, benchmarks, contribution workflow.

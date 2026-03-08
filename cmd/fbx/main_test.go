@@ -89,7 +89,7 @@ func TestInspectContainerCodecsRejectsOversizedDirectory(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	_, err = inspectContainerCodecs(path)
+	_, err = inspectContainerCodecs(path, "auto")
 	if !errors.Is(err, fbx.ErrLimitExceeded) {
 		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
@@ -250,7 +250,7 @@ func TestRunSetMetaMany(t *testing.T) {
 	if !strings.Contains(out, "entries_updated=2") {
 		t.Fatalf("expected updated output, got: %s", out)
 	}
-	rep, err := inspectContainerCodecs(containerPath)
+	rep, err := inspectContainerCodecs(containerPath, "auto")
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestRunInfoAndInspectCodecs(t *testing.T) {
 	}
 	_ = c.Close()
 
-	report, err := inspectContainerCodecs(containerPath)
+	report, err := inspectContainerCodecs(containerPath, "auto")
 	if err != nil {
 		t.Fatalf("inspectContainerCodecs: %v", err)
 	}
@@ -532,13 +532,51 @@ func TestRunPackMany(t *testing.T) {
 		t.Fatalf("runPackMany exit code: %d", code)
 	}
 	for _, p := range paths {
-		rep, err := inspectContainerCodecs(p)
+		rep, err := inspectContainerCodecs(p, "auto")
 		if err != nil {
 			t.Fatalf("inspect %s: %v", p, err)
 		}
 		if rep.ChunkCounts["zstd"] == 0 {
 			t.Fatalf("expected zstd chunks in %s, got %+v", p, rep.ChunkCounts)
 		}
+	}
+}
+
+func TestRunInfoAndVerifyFormatFlags(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "format-flags.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("alpha")), nil, &fbx.WriteOptions{Codec: fbx.CodecStore}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	if code := runInfo([]string{"--format", "v1", containerPath}); code != 0 {
+		t.Fatalf("runInfo v1 exit code: %d", code)
+	}
+	if code := runVerify([]string{"--mode", "dir", "--format", "v1", containerPath}); code != 0 {
+		t.Fatalf("runVerify v1 exit code: %d", code)
+	}
+
+	errOut := captureStderr(t, func() {
+		if code := runInfo([]string{"--format", "bad", containerPath}); code != 2 {
+			t.Fatalf("runInfo bad-format exit code: %d", code)
+		}
+	})
+	if !strings.Contains(errOut, "--format must be auto|v1") {
+		t.Fatalf("expected format parse error in info, got: %s", errOut)
+	}
+	errOut = captureStderr(t, func() {
+		if code := runVerify([]string{"--mode", "dir", "--format", "bad", containerPath}); code != 2 {
+			t.Fatalf("runVerify bad-format exit code: %d", code)
+		}
+	})
+	if !strings.Contains(errOut, "--format must be auto|v1") {
+		t.Fatalf("expected format parse error in verify, got: %s", errOut)
 	}
 }
 
@@ -708,6 +746,80 @@ func TestRunPackDoesNotSkipWhenDeadDataPresent(t *testing.T) {
 	})
 	if !strings.Contains(strings.ToLower(errOut), "skip") {
 		t.Fatalf("expected skip after dead data is compacted, got: %s", errOut)
+	}
+}
+
+func TestRunMigrate(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "migrate-cli.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("alpha")), nil, &fbx.WriteOptions{Codec: fbx.CodecStore}); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	out := captureStdout(t, func() {
+		if code := runMigrate([]string{"--verify-source", "dir", containerPath}); code != 0 {
+			t.Fatalf("runMigrate exit code: %d", code)
+		}
+	})
+	if !strings.Contains(out, "migration=ok") {
+		t.Fatalf("expected migration marker, got: %s", out)
+	}
+
+	co, err := fbx.Open(containerPath, nil)
+	if err != nil {
+		t.Fatalf("open migrated: %v", err)
+	}
+	defer co.Close()
+	var extracted bytes.Buffer
+	if err := co.Extract("books/a.fb2", &extracted); err != nil {
+		t.Fatalf("extract migrated payload: %v", err)
+	}
+	if extracted.String() != "alpha" {
+		t.Fatalf("unexpected payload after migrate: %q", extracted.String())
+	}
+}
+
+func TestRunMigrateDryRunAndBadArgs(t *testing.T) {
+	dir := t.TempDir()
+	containerPath := filepath.Join(dir, "migrate-dry-run.fbx")
+	c, err := fbx.Create(containerPath, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("book.fb2", bytes.NewReader([]byte("x")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	_ = c.Close()
+
+	stBefore, err := os.Stat(containerPath)
+	if err != nil {
+		t.Fatalf("stat before dry-run: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if code := runMigrate([]string{"--dry-run", "--verify-source", "all", containerPath}); code != 0 {
+			t.Fatalf("runMigrate dry-run exit code: %d", code)
+		}
+	})
+	if !strings.Contains(out, "migration_dry_run=ok") {
+		t.Fatalf("expected dry-run marker, got: %s", out)
+	}
+	stAfter, err := os.Stat(containerPath)
+	if err != nil {
+		t.Fatalf("stat after dry-run: %v", err)
+	}
+	if stAfter.Size() != stBefore.Size() {
+		t.Fatalf("dry-run must not mutate file: before=%d after=%d", stBefore.Size(), stAfter.Size())
+	}
+
+	if code := runMigrate([]string{"--verify-source", "bad", containerPath}); code != 2 {
+		t.Fatalf("expected bad args exit code 2, got %d", code)
 	}
 }
 

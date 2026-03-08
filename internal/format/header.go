@@ -12,8 +12,10 @@ const (
 )
 
 const (
-	HeaderFlagHasJournal uint32 = 1 << 0
-	HeaderFlagHasBackup  uint32 = 1 << 1
+	HeaderFlagHasJournal          uint32 = 1 << 0
+	HeaderFlagHasBackup           uint32 = 1 << 1
+	HeaderFlagHasDirIndex         uint32 = 1 << 2
+	HeaderFlagHasRequiredFeatures uint32 = 1 << 3
 )
 
 var (

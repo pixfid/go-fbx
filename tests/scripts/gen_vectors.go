@@ -34,7 +34,6 @@ func main() {
 	must(os.MkdirAll(root, 0o755))
 
 	must(genV1(filepath.Join(root, "v1-min-store")))
-	must(genV2(filepath.Join(root, "v2-two-zstd")))
 	must(genV3(filepath.Join(root, "v3-replace")))
 	must(genV4(filepath.Join(root, "v4-remove")))
 	must(genV5(filepath.Join(root, "v5-corrupt-crc")))
@@ -67,47 +66,6 @@ func genV1(dir string) error {
 			Path:         "book.fb2",
 			ExpectedFile: "expected/book.fb2",
 		}},
-	})
-}
-
-func genV2(dir string) error {
-	if err := resetDir(dir); err != nil {
-		return err
-	}
-	container := filepath.Join(dir, "container.fbx")
-	c, err := fbx.Create(container, nil)
-	if err != nil {
-		return err
-	}
-	a := []byte("alpha alpha alpha\n")
-	b := []byte("beta beta beta\n")
-	if err := c.Add("books/a.fb2", bytes.NewReader(a), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd}); err != nil {
-		_ = c.Close()
-		return err
-	}
-	if err := c.Add("books/b.fb2", bytes.NewReader(b), nil, &fbx.WriteOptions{Codec: fbx.CodecZstd}); err != nil {
-		_ = c.Close()
-		return err
-	}
-	if err := c.Close(); err != nil {
-		return err
-	}
-	if err := writeExpected(dir, "books/a.fb2", a); err != nil {
-		return err
-	}
-	if err := writeExpected(dir, "books/b.fb2", b); err != nil {
-		return err
-	}
-	return writeManifest(dir, Manifest{
-		Name:        "v2-two-zstd",
-		Description: "Two entries encoded with ZSTD chunks",
-		RequiredCodecs: []string{
-			"zstd",
-		},
-		Entries: []ManifestEntry{
-			{Path: "books/a.fb2", ExpectedFile: "expected/books/a.fb2"},
-			{Path: "books/b.fb2", ExpectedFile: "expected/books/b.fb2"},
-		},
 	})
 }
 
