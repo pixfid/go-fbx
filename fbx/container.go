@@ -22,6 +22,8 @@ type Container struct {
 	formatVersion uint16
 	header        format.HeaderV1
 	entries       map[string]format.EntryV1
+	lazyDirBlob   []byte
+	lazyDirIndex  *format.DirIndexV1
 }
 
 const maxDirectoryBlobSize uint64 = 1 << 30 // 1 GiB hard cap for directory blob reads.
@@ -44,9 +46,9 @@ func Open(path string, opts *Options) (*Container, error) {
 	var openErr error
 	h, err := format.UnmarshalHeaderV1(headBuf)
 	if err == nil {
-		entries, err := readEntriesByHeader(f, h)
+		snap, err := loadSnapshotByHeader(f, h, true)
 		if err == nil {
-			return &Container{file: f, opts: o, formatVersion: format.VersionV1, header: h, entries: entries}, nil
+			return buildContainerFromSnapshot(f, o, h, snap), nil
 		}
 		openErr = mapErr(err)
 		if !shouldAttemptOpenRecovery(openErr) {
@@ -58,7 +60,7 @@ func Open(path string, opts *Options) (*Container, error) {
 	}
 
 	tryRecovered := func(recovered format.HeaderV1) (*Container, error) {
-		entries, rerr := readEntriesByHeader(f, recovered)
+		snap, rerr := loadSnapshotByHeader(f, recovered, true)
 		if rerr != nil {
 			rerr = mapErr(rerr)
 			if shouldAttemptOpenRecovery(rerr) {
@@ -74,7 +76,7 @@ func Open(path string, opts *Options) (*Container, error) {
 			_, _ = f.WriteAt(recoveredBuf, 0)
 			_ = f.Sync()
 		}
-		return &Container{file: f, opts: o, header: recovered, entries: entries}, nil
+		return buildContainerFromSnapshot(f, o, recovered, snap), nil
 	}
 
 	recovered, recErr := recoverHeaderFromFixedBackup(f)
@@ -127,6 +129,24 @@ func Open(path string, opts *Options) (*Container, error) {
 		return nil, openErr
 	}
 	return nil, mapErr(recErr)
+}
+
+type containerSnapshot struct {
+	entries  map[string]format.EntryV1
+	dirBlob  []byte
+	dirIndex *format.DirIndexV1
+}
+
+func buildContainerFromSnapshot(f *os.File, opts Options, h format.HeaderV1, snap containerSnapshot) *Container {
+	return &Container{
+		file:          f,
+		opts:          opts,
+		formatVersion: format.VersionV1,
+		header:        h,
+		entries:       snap.entries,
+		lazyDirBlob:   snap.dirBlob,
+		lazyDirIndex:  snap.dirIndex,
+	}
 }
 
 func Create(path string, opts *Options) (*Container, error) {
@@ -197,12 +217,20 @@ func (c *Container) Close() error {
 }
 
 func (c *Container) List() Iterator[EntryInfo] {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	if c.file == nil {
+		c.mu.Unlock()
+		return newSliceIterator[EntryInfo](nil, errors.New("fbx: container closed"))
+	}
+	if err := c.ensureEntriesLoadedLocked(); err != nil {
+		c.mu.Unlock()
+		return newSliceIterator[EntryInfo](nil, err)
+	}
 	infos := make([]EntryInfo, 0, len(c.entries))
 	for _, e := range c.entries {
 		infos = append(infos, entryInfo(e))
 	}
+	c.mu.Unlock()
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Path < infos[j].Path })
 	return newSliceIterator(infos, nil)
 }
@@ -213,12 +241,31 @@ func (c *Container) Stat(path string) (EntryInfo, error) {
 		return EntryInfo{}, ErrPathInvalid
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.entries[norm]
-	if !ok {
-		return EntryInfo{}, ErrNotFound
+	if c.file == nil {
+		c.mu.RUnlock()
+		return EntryInfo{}, errors.New("fbx: container closed")
 	}
-	return entryInfo(e), nil
+	if c.entries != nil {
+		e, ok := c.entries[norm]
+		c.mu.RUnlock()
+		if !ok {
+			return EntryInfo{}, ErrNotFound
+		}
+		return entryInfo(e), nil
+	}
+	if c.lazyDirIndex != nil {
+		e, ok, err := findEntryByPathFromDirIndex(c.lazyDirBlob, c.lazyDirIndex, norm)
+		c.mu.RUnlock()
+		if err != nil {
+			return EntryInfo{}, err
+		}
+		if !ok {
+			return EntryInfo{}, ErrNotFound
+		}
+		return entryInfo(e), nil
+	}
+	c.mu.RUnlock()
+	return EntryInfo{}, ErrInvalidFormat
 }
 
 func (c *Container) OpenReader(path string) (io.ReadCloser, error) {
@@ -228,13 +275,28 @@ func (c *Container) OpenReader(path string) (io.ReadCloser, error) {
 	}
 	c.mu.RLock()
 	file := c.file
-	e, ok := c.entries[norm]
 	verifyCRC := c.opts.StrictVerify
 	maxEntry := c.opts.MaxEntrySize
 	maxChunk := c.opts.MaxChunkSize
-	c.mu.RUnlock()
 	if file == nil {
+		c.mu.RUnlock()
 		return nil, errors.New("fbx: container closed")
+	}
+	var (
+		e    format.EntryV1
+		ok   bool
+		lerr error
+	)
+	if c.entries != nil {
+		e, ok = c.entries[norm]
+	} else if c.lazyDirIndex != nil {
+		e, ok, lerr = findEntryByPathFromDirIndex(c.lazyDirBlob, c.lazyDirIndex, norm)
+	} else {
+		lerr = ErrInvalidFormat
+	}
+	c.mu.RUnlock()
+	if lerr != nil {
+		return nil, lerr
 	}
 	if !ok {
 		return nil, ErrNotFound
@@ -348,15 +410,20 @@ func (c *Container) Begin() (*Tx, error) {
 		return nil, ErrUnsupportedFeature
 	}
 	// c.file is protected by c.mu; read it under the same lock used by Close().
-	c.mu.RLock()
+	c.mu.Lock()
 	if c.file == nil {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		c.txMu.Unlock()
 		return nil, errors.New("fbx: container closed")
 	}
+	if err := c.ensureEntriesLoadedLocked(); err != nil {
+		c.mu.Unlock()
+		c.txMu.Unlock()
+		return nil, err
+	}
 	st, err := c.file.Stat()
 	if err != nil {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		c.txMu.Unlock()
 		return nil, err
 	}
@@ -364,7 +431,7 @@ func (c *Container) Begin() (*Tx, error) {
 	for k, v := range c.entries {
 		entries[k] = cloneEntry(v)
 	}
-	c.mu.RUnlock()
+	c.mu.Unlock()
 	return &Tx{
 		c:            c,
 		entries:      entries,
@@ -379,15 +446,20 @@ func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
 	}
 	report := &VerifyReport{}
 
-	c.mu.RLock()
+	c.mu.Lock()
 	h := c.header
 	formatVersion := c.formatVersion
 	maxChunk := c.opts.MaxChunkSize
+	if err := c.ensureEntriesLoadedLocked(); err != nil {
+		c.mu.Unlock()
+		report.Errors = append(report.Errors, err)
+		return report, errors.Join(report.Errors...)
+	}
 	entries := make([]format.EntryV1, 0, len(c.entries))
 	for _, e := range c.entries {
 		entries = append(entries, cloneEntry(e))
 	}
-	c.mu.RUnlock()
+	c.mu.Unlock()
 
 	if formatVersion == format.VersionV1 {
 		dirBlob, err := readDirectoryBlobByHeader(c.file, h)
@@ -599,45 +671,123 @@ func validateHeaderDirectory(f *os.File, h format.HeaderV1) error {
 }
 
 func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.EntryV1, error) {
-	if err := validateHeaderRequiredFeatures(h); err != nil {
+	snap, err := loadSnapshotByHeader(f, h, false)
+	if err != nil {
 		return nil, err
+	}
+	return snap.entries, nil
+}
+
+func loadSnapshotByHeader(f *os.File, h format.HeaderV1, preferLazy bool) (containerSnapshot, error) {
+	if err := validateHeaderRequiredFeatures(h); err != nil {
+		return containerSnapshot{}, err
 	}
 	dirBlob, err := readDirectoryBlobByHeader(f, h)
 	if err != nil {
-		return nil, err
+		return containerSnapshot{}, err
 	}
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return containerSnapshot{}, err
 	}
 	fileSize := uint64(st.Size())
 
 	var entries map[string]format.EntryV1
 	if idx, ok, idxErr := maybeReadDirIndexByHeader(f, h, fileSize); idxErr != nil {
-		return nil, idxErr
+		return containerSnapshot{}, idxErr
 	} else if ok {
+		if preferLazy {
+			idxCopy := idx
+			return containerSnapshot{
+				dirBlob:  dirBlob,
+				dirIndex: &idxCopy,
+			}, nil
+		}
 		entries, err = readEntriesByDirIndex(dirBlob, h, idx)
 		if err != nil {
-			return nil, err
+			return containerSnapshot{}, err
 		}
 	} else {
 		dir, derr := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
 		if derr != nil {
-			return nil, mapErr(derr)
+			return containerSnapshot{}, mapErr(derr)
 		}
 		entries = make(map[string]format.EntryV1, len(dir.Entries))
 		for _, e := range dir.Entries {
 			if _, ok := entries[e.Path]; ok {
-				return nil, ErrInvalidFormat
+				return containerSnapshot{}, ErrInvalidFormat
 			}
 			entries[e.Path] = cloneEntry(e)
 		}
 	}
 
 	if err := validateEntriesChunkOffsets(entries, fileSize); err != nil {
-		return nil, err
+		return containerSnapshot{}, err
 	}
-	return entries, nil
+	return containerSnapshot{
+		entries: entries,
+	}, nil
+}
+
+func findEntryByPathFromDirIndex(dirBlob []byte, idx *format.DirIndexV1, path string) (format.EntryV1, bool, error) {
+	if idx == nil {
+		return format.EntryV1{}, false, nil
+	}
+	hash := format.FNV1a64(path)
+	ranges := idx.HashRanges
+	pos := sort.Search(len(ranges), func(i int) bool {
+		return ranges[i].PathHash64 >= hash
+	})
+	for i := pos; i < len(ranges) && ranges[i].PathHash64 == hash; i++ {
+		row := ranges[i]
+		end, ok := addUint64Checked(uint64(row.FirstEntryIndex), uint64(row.EntrySpan))
+		if !ok || end > uint64(len(idx.Entries)) {
+			return format.EntryV1{}, false, ErrInvalidFormat
+		}
+		for j := row.FirstEntryIndex; j < uint32(end); j++ {
+			eRow := idx.Entries[j]
+			e, err := format.DecodeDirectoryEntryAt(dirBlob, eRow.DirEntryOffset, eRow.DirEntrySize)
+			if err != nil {
+				return format.EntryV1{}, false, mapErr(err)
+			}
+			if e.Path == path {
+				return e, true, nil
+			}
+		}
+	}
+	return format.EntryV1{}, false, nil
+}
+
+func (c *Container) ensureEntriesLoadedLocked() error {
+	if c.entries != nil {
+		return nil
+	}
+	if c.file == nil {
+		return errors.New("fbx: container closed")
+	}
+	if c.lazyDirIndex != nil {
+		entries, err := readEntriesByDirIndex(c.lazyDirBlob, c.header, *c.lazyDirIndex)
+		if err != nil {
+			return err
+		}
+		st, err := c.file.Stat()
+		if err != nil {
+			return err
+		}
+		if err := validateEntriesChunkOffsets(entries, uint64(st.Size())); err != nil {
+			return err
+		}
+		c.entries = entries
+		c.lazyDirBlob = nil
+		c.lazyDirIndex = nil
+		return nil
+	}
+	entries, err := readEntriesByHeader(c.file, c.header)
+	if err != nil {
+		return err
+	}
+	c.entries = entries
+	return nil
 }
 
 func validateEntriesChunkOffsets(entries map[string]format.EntryV1, fileSize uint64) error {

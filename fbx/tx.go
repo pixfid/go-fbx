@@ -360,6 +360,8 @@ func (tx *Tx) Commit() error {
 	for k, v := range tx.entries {
 		tx.c.entries[k] = cloneEntry(v)
 	}
+	tx.c.lazyDirBlob = nil
+	tx.c.lazyDirIndex = nil
 	tx.c.mu.Unlock()
 
 	tx.release()

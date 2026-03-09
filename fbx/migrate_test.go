@@ -152,6 +152,61 @@ func TestReadEntriesByHeaderDetectsCorruptDirIndex(t *testing.T) {
 	}
 }
 
+func TestOpenUsesLazyDirIndexSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lazy-open.fbx")
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("books/a.fb2", bytes.NewReader([]byte("a")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add a: %v", err)
+	}
+	if err := c.Add("books/b.fb2", bytes.NewReader([]byte("b")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add b: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := Migrate(path, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	co, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer co.Close()
+
+	if co.entries != nil {
+		t.Fatalf("expected lazy open without eager entries map")
+	}
+	if co.lazyDirIndex == nil || len(co.lazyDirBlob) == 0 {
+		t.Fatalf("expected lazy dir index state to be populated")
+	}
+	info, err := co.Stat("books/a.fb2")
+	if err != nil {
+		t.Fatalf("lazy stat: %v", err)
+	}
+	if info.Path != "books/a.fb2" {
+		t.Fatalf("unexpected stat path: %s", info.Path)
+	}
+
+	tx, err := co.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	tx.Rollback()
+	if co.entries == nil {
+		t.Fatalf("expected begin() to materialize entries map")
+	}
+	if co.lazyDirIndex != nil || len(co.lazyDirBlob) != 0 {
+		t.Fatalf("expected lazy state to be dropped after materialization")
+	}
+}
+
 func readPrimaryHeaderFile(f *os.File) (format.HeaderV1, error) {
 	headBuf := make([]byte, format.HeaderSize)
 	if _, err := f.ReadAt(headBuf, 0); err != nil {
