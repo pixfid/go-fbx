@@ -17,12 +17,14 @@ import (
 )
 
 type Tx struct {
-	c            *Container
-	entries      map[string]format.EntryV1
-	appendOffset uint64
-	deadBytes    uint64
-	churnOps     uint64
-	closed       bool
+	c               *Container
+	entries         map[string]format.EntryV1
+	appendOffset    uint64
+	deadBytes       uint64
+	churnOps        uint64
+	closed          bool
+	fileWriteLocked bool
+	unlockWritePath func()
 }
 
 func (tx *Tx) Add(path string, r io.Reader, meta []byte, wopts *WriteOptions) error {
@@ -376,6 +378,14 @@ func (tx *Tx) Rollback() {
 }
 
 func (tx *Tx) release() {
+	if tx.fileWriteLocked && tx.c != nil && tx.c.file != nil {
+		_ = unlockFile(tx.c.file)
+		tx.fileWriteLocked = false
+	}
+	if tx.unlockWritePath != nil {
+		tx.unlockWritePath()
+		tx.unlockWritePath = nil
+	}
 	tx.closed = true
 	tx.c.txMu.Unlock()
 }

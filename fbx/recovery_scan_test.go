@@ -131,6 +131,46 @@ func TestOpenDirectoryScanFallsBackToPreviousDirectoryWhenLatestIsCorrupt(t *tes
 	}
 }
 
+func TestOpenDirectoryScanPrefersMostReadableSnapshotOverNewest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scan_quality.fbx")
+	oldBody := bytes.Repeat([]byte("old-good-"), 64)
+	newBody := bytes.Repeat([]byte("new-bad-"), 64)
+
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Upsert("books/a.fb2", bytes.NewReader(oldBody), nil, &WriteOptions{Codec: CodecStore}); err != nil {
+		_ = c.Close()
+		t.Fatalf("upsert old: %v", err)
+	}
+	if err := c.Upsert("books/a.fb2", bytes.NewReader(newBody), nil, &WriteOptions{Codec: CodecStore}); err != nil {
+		_ = c.Close()
+		t.Fatalf("upsert new: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	corruptCurrentHeadChunkByte(t, path, "books/a.fb2")
+	corruptPrimaryFixedAndAllTailRecords(t, path)
+
+	co, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("open with scan recovery: %v", err)
+	}
+	defer co.Close()
+
+	var out bytes.Buffer
+	if err := co.Extract("books/a.fb2", &out); err != nil {
+		t.Fatalf("extract recovered entry: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), oldBody) {
+		t.Fatalf("expected recovery to choose most readable snapshot")
+	}
+}
+
 func TestReadDirectoryCandidateAtRejectsOverflowedEntrySizes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "scan_overflow.bin")
@@ -231,4 +271,26 @@ func flipFileByte(t *testing.T, f *os.File, off int64) {
 	if _, err := f.WriteAt(b, off); err != nil {
 		t.Fatalf("write byte at %d: %v", off, err)
 	}
+}
+
+func corruptCurrentHeadChunkByte(t *testing.T, path, entryPath string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open rw: %v", err)
+	}
+	defer f.Close()
+	h := readPrimaryHeader(t, path)
+	entries, err := readEntriesByHeader(f, h)
+	if err != nil {
+		t.Fatalf("read entries: %v", err)
+	}
+	e, ok := entries[entryPath]
+	if !ok {
+		t.Fatalf("entry not found in head snapshot: %s", entryPath)
+	}
+	if len(e.Chunks) == 0 {
+		t.Fatalf("entry has no chunks: %s", entryPath)
+	}
+	flipFileByte(t, f, int64(e.Chunks[0].ChunkOffset+16))
 }

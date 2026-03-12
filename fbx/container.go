@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 type Container struct {
 	file          *os.File
+	path          string
 	opts          Options
 	txMu          sync.Mutex
 	mu            sync.RWMutex
@@ -33,6 +35,10 @@ func Open(path string, opts *Options) (*Container, error) {
 	if opts != nil {
 		o = mergeOptions(o, *opts)
 	}
+	absPath := path
+	if ap, aerr := filepath.Abs(path); aerr == nil {
+		absPath = ap
+	}
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
@@ -48,7 +54,7 @@ func Open(path string, opts *Options) (*Container, error) {
 	if err == nil {
 		snap, err := loadSnapshotByHeader(f, h, true)
 		if err == nil {
-			return buildContainerFromSnapshot(f, o, h, snap), nil
+			return buildContainerFromSnapshot(f, absPath, o, h, snap), nil
 		}
 		openErr = mapErr(err)
 		if !shouldAttemptOpenRecovery(openErr) {
@@ -71,12 +77,8 @@ func Open(path string, opts *Options) (*Container, error) {
 			}
 			return nil, rerr
 		}
-		recoveredBuf, mErr := recovered.MarshalBinary()
-		if mErr == nil {
-			_, _ = f.WriteAt(recoveredBuf, 0)
-			_ = f.Sync()
-		}
-		return buildContainerFromSnapshot(f, o, recovered, snap), nil
+		persistRecoveredHeader(f, recovered, absPath)
+		return buildContainerFromSnapshot(f, absPath, o, recovered, snap), nil
 	}
 
 	recovered, recErr := recoverHeaderFromFixedBackup(f)
@@ -137,9 +139,10 @@ type containerSnapshot struct {
 	dirIndex *format.DirIndexV1
 }
 
-func buildContainerFromSnapshot(f *os.File, opts Options, h format.HeaderV1, snap containerSnapshot) *Container {
+func buildContainerFromSnapshot(f *os.File, path string, opts Options, h format.HeaderV1, snap containerSnapshot) *Container {
 	return &Container{
 		file:          f,
+		path:          path,
 		opts:          opts,
 		formatVersion: format.VersionV1,
 		header:        h,
@@ -153,6 +156,10 @@ func Create(path string, opts *Options) (*Container, error) {
 	o := defaultOptions()
 	if opts != nil {
 		o = mergeOptions(o, *opts)
+	}
+	absPath := path
+	if ap, aerr := filepath.Abs(path); aerr == nil {
+		absPath = ap
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o644)
 	if err != nil {
@@ -198,7 +205,7 @@ func Create(path string, opts *Options) (*Container, error) {
 		}
 	}
 
-	return &Container{file: f, opts: o, formatVersion: format.VersionV1, header: h, entries: map[string]format.EntryV1{}}, nil
+	return &Container{file: f, path: absPath, opts: o, formatVersion: format.VersionV1, header: h, entries: map[string]format.EntryV1{}}, nil
 }
 
 func (c *Container) Close() error {
@@ -416,13 +423,24 @@ func (c *Container) Begin() (*Tx, error) {
 		c.txMu.Unlock()
 		return nil, errors.New("fbx: container closed")
 	}
+	unlockProcess := acquireProcessWriteLock(c.path)
+	if err := lockFileExclusive(c.file); err != nil {
+		unlockProcess()
+		c.mu.Unlock()
+		c.txMu.Unlock()
+		return nil, err
+	}
 	if err := c.ensureEntriesLoadedLocked(); err != nil {
+		_ = unlockFile(c.file)
+		unlockProcess()
 		c.mu.Unlock()
 		c.txMu.Unlock()
 		return nil, err
 	}
 	st, err := c.file.Stat()
 	if err != nil {
+		_ = unlockFile(c.file)
+		unlockProcess()
 		c.mu.Unlock()
 		c.txMu.Unlock()
 		return nil, err
@@ -433,10 +451,30 @@ func (c *Container) Begin() (*Tx, error) {
 	}
 	c.mu.Unlock()
 	return &Tx{
-		c:            c,
-		entries:      entries,
-		appendOffset: uint64(st.Size()),
+		c:               c,
+		entries:         entries,
+		appendOffset:    uint64(st.Size()),
+		unlockWritePath: unlockProcess,
+		fileWriteLocked: true,
 	}, nil
+}
+
+func persistRecoveredHeader(f *os.File, recovered format.HeaderV1, path string) {
+	recoveredBuf, mErr := recovered.MarshalBinary()
+	if mErr != nil {
+		return
+	}
+	unlockProcess := acquireProcessWriteLock(path)
+	defer unlockProcess()
+	if err := lockFileExclusive(f); err != nil {
+		return
+	}
+	defer func() { _ = unlockFile(f) }()
+	_, _ = f.WriteAt(recoveredBuf, 0)
+	if headerHasFixedBackupSlot(recovered) {
+		_, _ = f.WriteAt(recoveredBuf, fixedBackupOffset)
+	}
+	_ = f.Sync()
 }
 
 func (c *Container) Verify(vopts *VerifyOptions) (*VerifyReport, error) {
@@ -697,6 +735,13 @@ func loadSnapshotByHeader(f *os.File, h format.HeaderV1, preferLazy bool) (conta
 		return containerSnapshot{}, idxErr
 	} else if ok {
 		if preferLazy {
+			entryCount, envErr := validateDirectoryBlobEnvelope(dirBlob, h.DirCRC32, h.DirSize)
+			if envErr != nil {
+				return containerSnapshot{}, envErr
+			}
+			if int(entryCount) != len(idx.Entries) {
+				return containerSnapshot{}, ErrInvalidFormat
+			}
 			idxCopy := idx
 			return containerSnapshot{
 				dirBlob:  dirBlob,

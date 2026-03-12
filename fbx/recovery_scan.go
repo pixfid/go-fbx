@@ -17,6 +17,13 @@ const (
 	recoveryDirFooterSize    = 16
 )
 
+type recoveryDirectoryScore struct {
+	buildUnix       uint64
+	dirOffset       uint64
+	entriesTotal    uint32
+	entriesReadable uint32
+}
+
 func recoverHeaderFromDirectoryScan(f *os.File) (format.HeaderV1, error) {
 	st, err := f.Stat()
 	if err != nil {
@@ -29,8 +36,7 @@ func recoverHeaderFromDirectoryScan(f *os.File) (format.HeaderV1, error) {
 
 	var (
 		bestHeader format.HeaderV1
-		bestBuild  uint64
-		bestOffset uint64
+		bestScore  recoveryDirectoryScore
 		found      bool
 		tail       []byte
 	)
@@ -63,12 +69,11 @@ func recoverHeaderFromDirectoryScan(f *os.File) (format.HeaderV1, error) {
 			}
 			pos := searchFrom + idx
 			dirOffset := baseOffset + uint64(pos)
-			h, buildUnix, herr := buildHeaderFromDirectoryAt(f, dirOffset, fileSize)
+			h, score, herr := buildHeaderFromDirectoryAt(f, dirOffset, fileSize)
 			if herr == nil {
-				if !found || buildUnix > bestBuild || (buildUnix == bestBuild && dirOffset > bestOffset) {
+				if !found || betterRecoveryDirectoryScore(score, bestScore) {
 					bestHeader = h
-					bestBuild = buildUnix
-					bestOffset = dirOffset
+					bestScore = score
 					found = true
 				}
 			}
@@ -90,14 +95,30 @@ func recoverHeaderFromDirectoryScan(f *os.File) (format.HeaderV1, error) {
 	return bestHeader, nil
 }
 
-func buildHeaderFromDirectoryAt(f *os.File, dirOffset, fileSize uint64) (format.HeaderV1, uint64, error) {
+func betterRecoveryDirectoryScore(a, b recoveryDirectoryScore) bool {
+	if a.entriesReadable != b.entriesReadable {
+		return a.entriesReadable > b.entriesReadable
+	}
+	aUnreadable := a.entriesTotal - a.entriesReadable
+	bUnreadable := b.entriesTotal - b.entriesReadable
+	if aUnreadable != bUnreadable {
+		return aUnreadable < bUnreadable
+	}
+	if a.buildUnix != b.buildUnix {
+		return a.buildUnix > b.buildUnix
+	}
+	return a.dirOffset > b.dirOffset
+}
+
+func buildHeaderFromDirectoryAt(f *os.File, dirOffset, fileSize uint64) (format.HeaderV1, recoveryDirectoryScore, error) {
 	dir, dirSize, dirCRC, err := readDirectoryCandidateAt(f, dirOffset, fileSize)
 	if err != nil {
-		return format.HeaderV1{}, 0, err
+		return format.HeaderV1{}, recoveryDirectoryScore{}, err
 	}
 	if err := validateDirectoryChunkOffsets(dir, fileSize); err != nil {
-		return format.HeaderV1{}, 0, err
+		return format.HeaderV1{}, recoveryDirectoryScore{}, err
 	}
+	entriesReadable := assessReadableEntriesAt(f, dir)
 
 	h := format.HeaderV1{
 		Magic:       format.MagicHeader,
@@ -109,9 +130,14 @@ func buildHeaderFromDirectoryAt(f *os.File, dirOffset, fileSize uint64) (format.
 		DirCRC32:    dirCRC,
 	}
 	if err := validateHeaderDirectory(f, h); err != nil {
-		return format.HeaderV1{}, 0, err
+		return format.HeaderV1{}, recoveryDirectoryScore{}, err
 	}
-	return h, dir.BuildUnix, nil
+	return h, recoveryDirectoryScore{
+		buildUnix:       dir.BuildUnix,
+		dirOffset:       dirOffset,
+		entriesTotal:    uint32(len(dir.Entries)),
+		entriesReadable: entriesReadable,
+	}, nil
 }
 
 func readDirectoryCandidateAt(f *os.File, dirOffset, fileSize uint64) (format.DirectoryV1, uint64, uint32, error) {
@@ -224,4 +250,39 @@ func validateDirectoryChunkOffsets(dir format.DirectoryV1, fileSize uint64) erro
 		}
 	}
 	return nil
+}
+
+func assessReadableEntriesAt(f *os.File, dir format.DirectoryV1) uint32 {
+	var readable uint32
+	for _, e := range dir.Entries {
+		if entryReadableAt(f, e) {
+			readable++
+		}
+	}
+	return readable
+}
+
+func entryReadableAt(f *os.File, e format.EntryV1) bool {
+	var endRaw uint64
+	for i, ref := range e.Chunks {
+		rec, err := format.ReadChunkRecordAtOptLimited(f, int64(ref.ChunkOffset), true, ref.RawSize, ref.CompSize)
+		if err != nil {
+			return false
+		}
+		if rec.RawSize != ref.RawSize || rec.CompSize != ref.CompSize || rec.CRC32Raw != ref.CRC32Raw {
+			return false
+		}
+		if i > 0 && ref.RawOffset < endRaw {
+			return false
+		}
+		nextEnd, ok := addUint64Checked(ref.RawOffset, uint64(ref.RawSize))
+		if !ok {
+			return false
+		}
+		endRaw = nextEnd
+	}
+	if len(e.Chunks) == 0 {
+		return e.FileSize == 0
+	}
+	return endRaw == e.FileSize
 }

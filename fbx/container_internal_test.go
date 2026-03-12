@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pixfid/go-fbx/internal/format"
 	"github.com/pixfid/go-fbx/internal/pathutil"
@@ -357,5 +358,129 @@ func TestOpenReaderAfterCloseReturnsError(t *testing.T) {
 	}
 	if _, err := c.OpenReader("a"); err == nil {
 		t.Fatalf("expected error from OpenReader on closed container")
+	}
+}
+
+func TestBeginBlocksConcurrentWritersAcrossContainersInProcess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "process-write-lock.fbx")
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a", bytes.NewReader([]byte("x")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	c1, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("open c1: %v", err)
+	}
+	defer c1.Close()
+	c2, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("open c2: %v", err)
+	}
+	defer c2.Close()
+
+	tx1, err := c1.Begin()
+	if err != nil {
+		t.Fatalf("begin c1: %v", err)
+	}
+	defer tx1.Rollback()
+
+	type beginResult struct {
+		tx  *Tx
+		err error
+	}
+	done := make(chan beginResult, 1)
+	go func() {
+		tx2, err := c2.Begin()
+		done <- beginResult{tx: tx2, err: err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.tx != nil {
+			r.tx.Rollback()
+		}
+		t.Fatalf("second Begin must block while first tx holds writer lock (err=%v)", r.err)
+	case <-time.After(120 * time.Millisecond):
+	}
+
+	tx1.Rollback()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("second Begin after release: %v", r.err)
+		}
+		if r.tx == nil {
+			t.Fatalf("expected second Begin tx")
+		}
+		r.tx.Rollback()
+	case <-time.After(2 * time.Second):
+		t.Fatalf("second Begin did not proceed after first rollback")
+	}
+}
+
+func TestOpenRecoversBeforeLazyAdoptionWhenDirectoryCRCMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lazy-open-recover.fbx")
+	c, err := Create(path, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.Add("a.txt", bytes.NewReader([]byte("a")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add a: %v", err)
+	}
+	if err := c.Add("b.txt", bytes.NewReader([]byte("b")), nil, nil); err != nil {
+		_ = c.Close()
+		t.Fatalf("add b: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	broken := readPrimaryHeader(t, path)
+	if broken.Flags&format.HeaderFlagHasDirIndex == 0 {
+		t.Fatalf("expected HAS_DIR_INDEX in test fixture")
+	}
+	// Corrupt one byte inside the latest directory payload to force CRC mismatch.
+	corruptByteAt(t, path, int64(broken.DirOffset+20))
+
+	recovered, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("open with recovery: %v", err)
+	}
+	defer recovered.Close()
+
+	recovered.mu.RLock()
+	h := recovered.header
+	recovered.mu.RUnlock()
+	if h.DirOffset == broken.DirOffset && h.DirCRC32 == broken.DirCRC32 {
+		t.Fatalf("expected recovered header to differ from corrupted snapshot")
+	}
+
+	if _, err := recovered.Stat("a.txt"); err != nil {
+		t.Fatalf("stat recovered entry: %v", err)
+	}
+	it := recovered.List()
+	count := 0
+	for it.Next() {
+		count++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("list after recovery: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("expected at least one recovered entry")
+	}
+	if _, err := recovered.Verify(&VerifyOptions{Mode: VerifyDirectoryOnly}); err != nil {
+		t.Fatalf("verify dir after recovery: %v", err)
 	}
 }
