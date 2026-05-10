@@ -3,7 +3,7 @@
 Last updated: 2026-03-09
 
 ## Overall
-- Implemented: core FBX v1 library + CLI + ZIP->FBX conversion + pack + verify + compatibility vectors + journal recovery + v1 extension profile (`IDX1`) + legacy migration.
+- Implemented: core FBX v1 library + CLI + ZIP->FBX conversion + pack + verify + compatibility vectors + journal recovery + canonical v1 profile (`IDX1`, required-features).
 - Test status: `go test ./...` passes.
 
 ## RFC Coverage Matrix
@@ -19,8 +19,7 @@ Last updated: 2026-03-09
 | §12 Mass Operations | Implemented | `RemoveMany`, `RemovePrefix`, `RemoveGlob`, `RemoveWhere`. |
 | §13 Compaction (`pack`) | Implemented | In-place and out-of-place pack via API/CLI. |
 | §14 Verification (`verify`) | Implemented | `dir`, `sample`, `all` modes in API/CLI. |
-| v1 Extension profile (`HAS_DIR_INDEX`, required-features) | Implemented | `IDX1` commit/open path and header extension fields are active in writer/reader. |
-| Legacy migration (`migrate`) | Implemented | Append-only metadata migration without payload re-encode; API + CLI coverage. |
+| Canonical v1 profile (`HAS_DIR_INDEX`, required-features) | Implemented | `IDX1` commit/open path and header fields are mandatory for supported snapshots. |
 | §15 Error handling | Implemented | Public typed errors (`ErrNotFound`, `ErrCRCMismatch`, etc.). |
 | §16 Security considerations | Mostly implemented | Path validation, streaming I/O, configurable read/write limits (`MaxEntrySize`, `MaxChunkSize`), ZSTD decoder memory/window limits. |
 | §18 Reference architecture/API/CLI | Mostly implemented | Core API and major CLI commands are present. |
@@ -42,4 +41,4 @@ Last updated: 2026-03-09
 - ZSTD is pure-Go (`klauspost/compress`) and available without cgo.
 - LZ4 is pure-Go (`pierrec/lz4/v4`) and available without cgo.
 - Text detection and “already-compressed” heuristics are best-effort and extension/magic-byte based.
-- Fixed backup slot is guaranteed for containers created with current layout; legacy containers still recover via journal/backup records.
+- Fixed backup slot is guaranteed for containers created with current layout.

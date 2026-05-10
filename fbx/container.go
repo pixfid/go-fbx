@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -113,15 +114,16 @@ func Open(path string, opts *Options) (*Container, error) {
 
 	recovered, recErr = recoverHeaderFromDirectoryScan(f)
 	if recErr == nil {
-		c, fatal := tryRecovered(recovered)
-		if fatal != nil {
+		snap, snapErr := loadSnapshotFromDirectoryRecovery(f, recovered)
+		if snapErr != nil {
+			snapErr = mapErr(snapErr)
+			if openErr == nil {
+				openErr = snapErr
+			}
 			_ = f.Close()
-			return nil, fatal
+			return nil, snapErr
 		}
-		if c != nil {
-			c.formatVersion = format.VersionV1
-			return c, nil
-		}
+		return buildContainerFromSnapshot(f, absPath, o, recovered, snap), nil
 	} else if openErr == nil {
 		openErr = mapErr(recErr)
 	}
@@ -174,12 +176,6 @@ func Create(path string, opts *Options) (*Container, error) {
 	markHeaderV1ExtensionLayout(&h)
 	_, _ = rand.Read(h.UUID[:])
 
-	headBuf, _ := h.MarshalBinary()
-	if _, err := f.WriteAt(headBuf, 0); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-
 	dirBlob, crc, err := format.EncodeDirectory(format.DirectoryV1{BuildUnix: uint64(time.Now().Unix())})
 	if err != nil {
 		_ = f.Close()
@@ -190,10 +186,61 @@ func Create(path string, opts *Options) (*Container, error) {
 		_ = f.Close()
 		return nil, err
 	}
+	generation := uint64(1)
+	idxBlob, err := buildDirIndexBlob(dirBlob, dirOffset, crc, generation)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	idxOffset := dirOffset + uint64(len(dirBlob))
+	if _, err := f.WriteAt(idxBlob, int64(idxOffset)); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	journalOffset := idxOffset + uint64(len(idxBlob))
 	h.DirOffset = dirOffset
 	h.DirSize = uint64(len(dirBlob))
 	h.DirCRC32 = crc
-	headBuf, _ = h.MarshalBinary()
+	h.Flags |= format.HeaderFlagHasJournal
+	h.Flags |= format.HeaderFlagHasBackup
+	h.Flags |= format.HeaderFlagHasDirIndex
+	h.Flags |= format.HeaderFlagHasRequiredFeatures
+	h.JournalOffset = journalOffset
+	h.JournalSize = journalRecordSize
+	writeHeaderGeneration(&h, generation)
+	writeHeaderDirIndexPointer(&h, dirIndexPointer{
+		offset: idxOffset,
+		size:   uint64(len(idxBlob)),
+		crc32:  crc32.ChecksumIEEE(idxBlob),
+	})
+	writeHeaderRequiredFeaturesLow(&h, requiredFeaturesSupported)
+	headBuf, err := h.MarshalBinary()
+	if err != nil {
+		_ = f.Close()
+		return nil, mapErr(err)
+	}
+	journalRec, err := buildJournalRecord(headBuf, uint64(time.Now().Unix()))
+	if err != nil {
+		_ = f.Close()
+		return nil, mapErr(err)
+	}
+	if _, err := f.WriteAt(journalRec, int64(journalOffset)); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	backupRec, err := buildBackupRecord(headBuf, uint64(time.Now().Unix()))
+	if err != nil {
+		_ = f.Close()
+		return nil, mapErr(err)
+	}
+	if _, err := f.WriteAt(backupRec, int64(journalOffset)+int64(len(journalRec))); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err := f.WriteAt(headBuf, fixedBackupOffset); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	if _, err := f.WriteAt(headBuf, 0); err != nil {
 		_ = f.Close()
 		return nil, err
@@ -206,6 +253,32 @@ func Create(path string, opts *Options) (*Container, error) {
 	}
 
 	return &Container{file: f, path: absPath, opts: o, formatVersion: format.VersionV1, header: h, entries: map[string]format.EntryV1{}}, nil
+}
+
+func loadSnapshotFromDirectoryRecovery(f *os.File, h format.HeaderV1) (containerSnapshot, error) {
+	dirBlob, err := readDirectoryBlobByHeader(f, h)
+	if err != nil {
+		return containerSnapshot{}, err
+	}
+	dir, err := format.DecodeDirectory(dirBlob, h.DirCRC32, h.DirSize)
+	if err != nil {
+		return containerSnapshot{}, mapErr(err)
+	}
+	entries := make(map[string]format.EntryV1, len(dir.Entries))
+	for _, e := range dir.Entries {
+		if _, ok := entries[e.Path]; ok {
+			return containerSnapshot{}, ErrInvalidFormat
+		}
+		entries[e.Path] = cloneEntry(e)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return containerSnapshot{}, err
+	}
+	if err := validateEntriesChunkOffsets(entries, uint64(st.Size())); err != nil {
+		return containerSnapshot{}, err
+	}
+	return containerSnapshot{entries: entries}, nil
 }
 
 func (c *Container) Close() error {
@@ -717,7 +790,7 @@ func readEntriesByHeader(f *os.File, h format.HeaderV1) (map[string]format.Entry
 }
 
 func loadSnapshotByHeader(f *os.File, h format.HeaderV1, preferLazy bool) (containerSnapshot, error) {
-	if err := validateHeaderRequiredFeatures(h); err != nil {
+	if err := validateCanonicalHeaderLayout(h); err != nil {
 		return containerSnapshot{}, err
 	}
 	dirBlob, err := readDirectoryBlobByHeader(f, h)

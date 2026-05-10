@@ -65,7 +65,6 @@ go run ./cmd/fbx convert-zip \
 ```bash
 go run ./cmd/fbx info books.fbx
 go run ./cmd/fbx verify --mode all books.fbx
-go run ./cmd/fbx migrate --dry-run --verify-source all books.fbx
 go run ./cmd/fbx list books.fbx
 go run ./cmd/fbx stat --json books.fbx books/123.fb2
 ```
@@ -127,7 +126,7 @@ entries_updated=2 missing=0
 ### 6. Repack / codec migration / metadata cleanup
 
 ```bash
-# migrate container to zstd
+# repack container to zstd
 go run ./cmd/fbx pack --codec zstd --level 6 books.fbx
 
 # drop metadata for all entries during repack
@@ -259,6 +258,5 @@ if err := fbx.Pack("books.fbx", "books-compacted.fbx", &fbx.PackOptions{Codec: f
 - [docs/CLI.md](docs/CLI.md) - full command reference and examples.
 - [docs/API.md](docs/API.md) - public Go API and options.
 - [docs/FORMAT_AND_RECOVERY.md](docs/FORMAT_AND_RECOVERY.md) - on-disk model and recovery flow.
-- [docs/V1_EXTENSION_SPEC.md](docs/V1_EXTENSION_SPEC.md) - incompatible `v1` extension profile (`IDX1`, required features, commit contract).
-- [docs/MIGRATION.md](docs/MIGRATION.md) - legacy-to-extension migration flow and guarantees.
+- [docs/V1_EXTENSION_SPEC.md](docs/V1_EXTENSION_SPEC.md) - canonical `v1` on-disk profile (`IDX1`, required features, commit contract).
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - tests, vectors, benchmarks, contribution workflow.

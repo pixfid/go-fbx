@@ -14,7 +14,6 @@ Binary entrypoint: `go run ./cmd/fbx` (or build `./cmd/fbx`).
 - `replace-text` — bulk byte-string replacement in matching entries.
 - `extract` — stream one entry out.
 - `verify` — integrity validation.
-- `migrate` — append-only upgrade of legacy containers to `v1` extension layout.
 
 ## Global Semantics
 - Exit codes:
@@ -337,23 +336,3 @@ Modes:
 - `all`: directory + all chunks.
 
 Output: `entries_checked=<n> chunks_checked=<n> errors=<n>`.
-
-## `migrate`
-Syntax:
-```bash
-fbx migrate [flags] <container.fbx>
-```
-
-Flags:
-
-| Flag | Default | What it does | Why use it |
-|---|---:|---|---|
-| `--verify-source dir\|sample\|all` | `dir` | Preflight verification depth for source snapshot. | Catch corruption before migration write. |
-| `--verify-target` | `true` | Run full verify (`all`) after migration commit. | Confirm migrated snapshot integrity. |
-| `--dry-run` | `false` | Perform preflight verify only, do not write container. | Validate migration readiness in CI/script pipelines. |
-
-Output:
-- normal run: `migration=ok`
-- dry-run: `migration_dry_run=ok`
-
-See also: [MIGRATION.md](./MIGRATION.md).

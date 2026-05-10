@@ -108,14 +108,6 @@ type PackProgress struct {
 	EntryPath    string
 }
 
-type MigrateOptions struct {
-	// VerifySource controls source validation before migration.
-	// Default is VerifyDirectoryOnly.
-	VerifySource VerifyMode
-	// VerifyTarget enables post-migration full chunk verification on the target snapshot.
-	VerifyTarget bool
-}
-
 type EntryInfo struct {
 	Path      string
 	Size      uint64

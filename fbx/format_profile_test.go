@@ -5,86 +5,52 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/pixfid/go-fbx/internal/format"
 )
 
-func TestMigratePreservesChunkRefsAndPayload(t *testing.T) {
+func TestCreateWritesCanonicalV1Layout(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "migrate.fbx")
+	path := filepath.Join(dir, "canonical-empty.fbx")
 	c, err := Create(path, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	bodyA := bytes.Repeat([]byte("alpha-"), 256)
-	bodyB := bytes.Repeat([]byte("beta-"), 128)
-	if err := c.Add("books/a.fb2", bytes.NewReader(bodyA), []byte(`{"id":1}`), &WriteOptions{Codec: CodecStore}); err != nil {
-		_ = c.Close()
-		t.Fatalf("add a: %v", err)
-	}
-	if err := c.Add("books/b.fb2", bytes.NewReader(bodyB), []byte(`{"id":2}`), &WriteOptions{Codec: CodecStore}); err != nil {
-		_ = c.Close()
-		t.Fatalf("add b: %v", err)
-	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if err := rewritePrimaryHeaderAsLegacy(path); err != nil {
-		t.Fatalf("rewrite primary header to legacy: %v", err)
-	}
 
-	pre, err := readPrimaryEntries(path)
+	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("read pre entries: %v", err)
+		t.Fatalf("open file: %v", err)
 	}
+	defer f.Close()
 
-	if err := Migrate(path, &MigrateOptions{VerifySource: VerifyDirectoryOnly, VerifyTarget: true}); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	h, post, err := readPrimaryHeaderAndEntries(path)
+	h, err := readPrimaryHeaderFile(f)
 	if err != nil {
-		t.Fatalf("read post entries: %v", err)
+		t.Fatalf("read header: %v", err)
 	}
-	if !headerHasDirIndexExtension(h) {
-		t.Fatalf("expected extension header after migrate, flags=%#x reserved[0]=%d", h.Flags, h.Reserved[0])
-	}
-	if h.Flags&format.HeaderFlagHasJournal == 0 || h.Flags&format.HeaderFlagHasBackup == 0 || h.Flags&format.HeaderFlagHasDirIndex == 0 || h.Flags&format.HeaderFlagHasRequiredFeatures == 0 {
-		t.Fatalf("missing expected header flags: %#x", h.Flags)
+	if err := validateCanonicalHeaderLayout(h); err != nil {
+		t.Fatalf("expected canonical header layout, got %v", err)
 	}
 	if readHeaderGeneration(h) == 0 {
-		t.Fatalf("expected generation > 0 after migrate")
-	}
-	if !reflect.DeepEqual(post, pre) {
-		t.Fatalf("entries changed after migrate")
+		t.Fatalf("expected non-zero initial generation")
 	}
 
 	co, err := Open(path, nil)
 	if err != nil {
-		t.Fatalf("open migrated: %v", err)
+		t.Fatalf("open canonical container: %v", err)
 	}
 	defer co.Close()
-	var out bytes.Buffer
-	if err := co.Extract("books/a.fb2", &out); err != nil {
-		t.Fatalf("extract a: %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), bodyA) {
-		t.Fatalf("payload a mismatch")
-	}
-	out.Reset()
-	if err := co.Extract("books/b.fb2", &out); err != nil {
-		t.Fatalf("extract b: %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), bodyB) {
-		t.Fatalf("payload b mismatch")
+	if co.lazyDirIndex == nil || len(co.lazyDirBlob) == 0 {
+		t.Fatalf("expected lazy directory state for canonical open")
 	}
 }
 
-func TestMigrateIdempotent(t *testing.T) {
+func TestReadEntriesByHeaderRejectsLegacySnapshotLayout(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "migrate-idempotent.fbx")
+	path := filepath.Join(dir, "legacy-header.fbx")
 	c, err := Create(path, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -93,24 +59,35 @@ func TestMigrateIdempotent(t *testing.T) {
 		_ = c.Close()
 		t.Fatalf("add: %v", err)
 	}
-	_ = c.Close()
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
-	if err := Migrate(path, nil); err != nil {
-		t.Fatalf("first migrate: %v", err)
-	}
-	st1, err := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
-		t.Fatalf("stat after first migrate: %v", err)
+		t.Fatalf("open file: %v", err)
 	}
-	if err := Migrate(path, nil); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	st2, err := os.Stat(path)
+	defer f.Close()
+
+	h, err := readPrimaryHeaderFile(f)
 	if err != nil {
-		t.Fatalf("stat after second migrate: %v", err)
+		t.Fatalf("read header: %v", err)
 	}
-	if st2.Size() != st1.Size() {
-		t.Fatalf("expected idempotent migrate not to append, size1=%d size2=%d", st1.Size(), st2.Size())
+	h.Flags &^= format.HeaderFlagHasDirIndex | format.HeaderFlagHasRequiredFeatures
+	h.Reserved[headerReservedLayoutMarkerOffset] = 0
+	h.Reserved[headerReservedLayoutMinorOffset] = 0
+	writeHeaderGeneration(&h, 0)
+	writeHeaderDirIndexPointer(&h, dirIndexPointer{})
+	writeHeaderRequiredFeaturesLow(&h, 0)
+	buf, err := h.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal legacy header: %v", err)
+	}
+	if _, err := f.WriteAt(buf, 0); err != nil {
+		t.Fatalf("rewrite header: %v", err)
+	}
+	if _, err := readEntriesByHeader(f, h); !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat for non-canonical layout, got %v", err)
 	}
 }
 
@@ -125,9 +102,8 @@ func TestReadEntriesByHeaderDetectsCorruptDirIndex(t *testing.T) {
 		_ = c.Close()
 		t.Fatalf("add: %v", err)
 	}
-	_ = c.Close()
-	if err := Migrate(path, nil); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -169,9 +145,6 @@ func TestOpenUsesLazyDirIndexSnapshot(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
-	}
-	if err := Migrate(path, nil); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 
 	co, err := Open(path, nil)
@@ -235,28 +208,4 @@ func readPrimaryHeaderAndEntries(path string) (format.HeaderV1, map[string]forma
 func readPrimaryEntries(path string) (map[string]format.EntryV1, error) {
 	_, entries, err := readPrimaryHeaderAndEntries(path)
 	return entries, err
-}
-
-func rewritePrimaryHeaderAsLegacy(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h, err := readPrimaryHeaderFile(f)
-	if err != nil {
-		return err
-	}
-	h.Flags &^= format.HeaderFlagHasDirIndex | format.HeaderFlagHasRequiredFeatures
-	h.Reserved[headerReservedLayoutMarkerOffset] = headerLayoutMarkerLegacyBackupSlot
-	h.Reserved[headerReservedLayoutMinorOffset] = 0
-	writeHeaderGeneration(&h, 0)
-	writeHeaderDirIndexPointer(&h, dirIndexPointer{})
-	writeHeaderRequiredFeaturesLow(&h, 0)
-	buf, err := h.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteAt(buf, 0)
-	return err
 }

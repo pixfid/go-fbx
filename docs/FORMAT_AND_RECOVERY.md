@@ -2,13 +2,11 @@
 
 This implementation follows `FBX_RFC_BinarySpec_GoDoc_v1.md`.
 
-Note: baseline `v1` is still documented here, but current `go-fbx` writers use the
-incompatible `v1` extension profile (`HAS_JOURNAL` semantics, backup-header contract,
-`IDX1` lazy directory index, required features contract).
+Current `go-fbx` uses one canonical `v1` layout with `HAS_JOURNAL` semantics,
+backup-header contract, `IDX1` lazy directory index, and required-features contract.
 
 See:
 - [V1_EXTENSION_SPEC.md](./V1_EXTENSION_SPEC.md)
-- [MIGRATION.md](./MIGRATION.md)
 
 ## On-Disk Model
 - Header (`HDR1`) at offset `0`.
@@ -36,8 +34,8 @@ With `SyncOnCommit=true` (default), `fsync` is executed between critical stages.
 If primary header/directory validation fails:
 1. Try fixed backup header slot.
 2. Try scanning tail records (`JNL1`/`BKP1`) and pick latest valid by timestamp.
-3. Scan file for valid `DIR1 ... END1` snapshots and synthesize a header from the newest valid directory.
-4. Re-write recovered header to offset `0`.
+3. Scan file for valid `DIR1 ... END1` snapshots and synthesize an in-memory snapshot from the newest valid directory.
+4. The next successful commit rewrites canonical backup/primary headers.
 
 If all recovery sources fail, `Open` returns `ErrInvalidFormat`.
 

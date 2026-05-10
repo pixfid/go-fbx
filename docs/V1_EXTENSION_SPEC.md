@@ -1,36 +1,28 @@
-# V1 Extension Spec (Journal Region, Backup Header, Directory Index)
+# V1 Format Profile (Journal Region, Backup Header, Directory Index)
 
 Status: Implemented in `go-fbx` main branch (2026-03-09)
 
-This document defines an incompatible extension of the existing `Version=1` container layout.  
-The base header stays `HeaderV1` (`HeaderSize=128`, `Version=1`).
+This document defines the canonical `Version=1` container layout used by current `go-fbx`.
+Older pre-`IDX1` snapshots are historical and are no longer part of the supported on-disk contract.
 
 ## Scope
 
-The extension adds three mandatory capabilities:
+The format requires three capabilities:
 
 1. Journal region with strict commit/recovery semantics (`HAS_JOURNAL`).
 2. Reserved backup header semantics (primary + fixed backup slot).
 3. Directory offset/hash index for lazy directory parsing.
 
-This spec also defines append-only conversion without payload rewrite.
-
-Operational migration runbook: [MIGRATION.md](./MIGRATION.md).
-
 ## Goals
 
 - Keep append-only writes and multi-GB streaming behavior.
-- Preserve user data losslessly during conversion:
-  - chunk payload bytes are never recompressed/reencoded;
-  - chunk references (`ChunkOffset`, `RawOffset`, `RawSize`, `CompSize`, `CRC32Raw`) are preserved.
 - Fail fast on unsupported required extension features.
 
 ## Non-Goals
 
-- Backward compatibility with pre-extension readers.
 - Introducing a new format version.
 
-## HeaderV1 Extension Contract
+## HeaderV1 Contract
 
 `HeaderV1.Flags` adds:
 
@@ -154,32 +146,6 @@ When `HAS_DIR_INDEX` is set and `IDX1` validates:
 
 If `IDX1` is missing/corrupt while `HAS_DIR_INDEX` is set, open MUST fail with `ErrInvalidFormat` (or `ErrCRCMismatch` when applicable).
 
-## Append-Only Conversion (Lossless User Data)
-
-Conversion from legacy `v1` to this extension:
-
-1. Preflight verify source snapshot (`dir|sample|all`).
-2. Read active `DIR1` snapshot and build `IDX1` from it.
-3. Append `IDX1` (no chunk rewrite).
-4. Commit new header using the protocol above.
-5. Optional post-verify (`all`).
-
-Data-preservation guarantees:
-
-- No payload chunk re-encoding.
-- Entry path/meta/mtime/mode/flags preserved.
-- Chunk refs preserved byte-for-byte in meaning.
-
-Failure model:
-
-- If conversion stops before primary-header write, previous snapshot remains authoritative.
-- Torn conversion tails are recoverable by backup header + journal semantics.
-
 ## Implementation Mapping (`go-fbx`)
-
-- API:
-  - `fbx.Migrate(path string, opts *MigrateOptions) error`
-- CLI:
-  - `fbx migrate [--verify-source dir|sample|all] [--verify-target] [--dry-run] <container.fbx>`
 - Writer behavior:
   - new commits append `DIR1` + `IDX1` + `JNL1` + `BKP1`, then update backup/primary headers.

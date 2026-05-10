@@ -7,16 +7,15 @@ import (
 )
 
 const (
-	headerReservedLayoutMarkerOffset   = 0
-	headerReservedLayoutMinorOffset    = 1
-	headerReservedGenerationOffset     = 24
-	headerReservedDirIndexOffset       = 32
-	headerReservedDirIndexSize         = 40
-	headerReservedDirIndexCRC          = 48
-	headerReservedRequiredFeaturesLow  = 52
-	headerLayoutMarkerLegacyBackupSlot = 1
-	headerLayoutMarkerV1Extension      = 2
-	headerLayoutMinorV1Extension       = 0
+	headerReservedLayoutMarkerOffset  = 0
+	headerReservedLayoutMinorOffset   = 1
+	headerReservedGenerationOffset    = 24
+	headerReservedDirIndexOffset      = 32
+	headerReservedDirIndexSize        = 40
+	headerReservedDirIndexCRC         = 48
+	headerReservedRequiredFeaturesLow = 52
+	headerLayoutMarkerV1Extension     = 2
+	headerLayoutMinorV1Extension      = 0
 )
 
 const (
@@ -38,8 +37,7 @@ type dirIndexPointer struct {
 }
 
 func headerHasFixedBackupSlot(h format.HeaderV1) bool {
-	marker := h.Reserved[headerReservedLayoutMarkerOffset]
-	return marker == headerLayoutMarkerLegacyBackupSlot || marker == headerLayoutMarkerV1Extension
+	return h.Reserved[headerReservedLayoutMarkerOffset] == headerLayoutMarkerV1Extension
 }
 
 func readHeaderGeneration(h format.HeaderV1) uint64 {
@@ -75,6 +73,34 @@ func writeHeaderRequiredFeaturesLow(h *format.HeaderV1, bits uint32) {
 func markHeaderV1ExtensionLayout(h *format.HeaderV1) {
 	h.Reserved[headerReservedLayoutMarkerOffset] = headerLayoutMarkerV1Extension
 	h.Reserved[headerReservedLayoutMinorOffset] = headerLayoutMinorV1Extension
+}
+
+func validateCanonicalHeaderLayout(h format.HeaderV1) error {
+	requiredFlags := format.HeaderFlagHasJournal |
+		format.HeaderFlagHasBackup |
+		format.HeaderFlagHasDirIndex |
+		format.HeaderFlagHasRequiredFeatures
+	if h.Flags&requiredFlags != requiredFlags {
+		return ErrInvalidFormat
+	}
+	if h.Reserved[headerReservedLayoutMarkerOffset] != headerLayoutMarkerV1Extension {
+		return ErrInvalidFormat
+	}
+	if h.Reserved[headerReservedLayoutMinorOffset] != headerLayoutMinorV1Extension {
+		return ErrInvalidFormat
+	}
+	if h.JournalOffset == 0 || h.JournalSize != journalRecordSize {
+		return ErrInvalidFormat
+	}
+	ptr := readHeaderDirIndexPointer(h)
+	if ptr.offset == 0 || ptr.size == 0 || ptr.crc32 == 0 {
+		return ErrInvalidFormat
+	}
+	required := readHeaderRequiredFeaturesLow(h)
+	if required&requiredFeaturesSupported != requiredFeaturesSupported {
+		return ErrInvalidFormat
+	}
+	return validateHeaderRequiredFeatures(h)
 }
 
 func validateHeaderRequiredFeatures(h format.HeaderV1) error {

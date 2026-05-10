@@ -61,8 +61,6 @@ func main() {
 		os.Exit(runExtract(os.Args[2:]))
 	case "verify":
 		os.Exit(runVerify(os.Args[2:]))
-	case "migrate":
-		os.Exit(runMigrate(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -90,7 +88,6 @@ Usage:
   fbx list <container.fbx>
   fbx extract [-o output] [--max-entry-size bytes] [--max-chunk-size bytes] <container.fbx> <entry-path>
   fbx verify [--mode dir|sample|all] [--format auto|v1] <container.fbx>
-  fbx migrate [--verify-source dir|sample|all] [--verify-target] [--dry-run] <container.fbx>
 `)
 }
 
@@ -1555,46 +1552,6 @@ func runVerify(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	return 0
-}
-
-func runMigrate(args []string) int {
-	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	verifySource := fs.String("verify-source", "dir", "source verification mode: dir|sample|all")
-	verifyTarget := fs.Bool("verify-target", true, "verify target with full chunk scan after migration")
-	dryRun := fs.Bool("dry-run", false, "validate source and report without writing")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "migrate requires <container.fbx>")
-		return 2
-	}
-	mode, err := parseVerifyModeFlag(*verifySource, "--verify-source")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
-	path := fs.Arg(0)
-	if *dryRun {
-		c, err := fbx.Open(path, nil)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		defer c.Close()
-		if _, err := c.Verify(&fbx.VerifyOptions{Mode: mode}); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		fmt.Println("migration_dry_run=ok")
-		return 0
-	}
-	if err := fbx.Migrate(path, &fbx.MigrateOptions{VerifySource: mode, VerifyTarget: *verifyTarget}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	fmt.Println("migration=ok")
 	return 0
 }
 

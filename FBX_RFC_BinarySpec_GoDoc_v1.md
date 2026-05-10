@@ -22,11 +22,10 @@ FBX v1 supports:
 
 FBX v1 deliberately avoids complexities such as encryption, deduplication, and full-text indexing, reserving room for future versions.
 
-Current `go-fbx` also defines an incompatible **v1 extension profile** (still
-`Header.version = 1`) for stronger commit/recovery semantics and lazy directory
-parsing. See:
+Current `go-fbx` treats the former **v1 extension profile** (still
+`Header.version = 1`) as the canonical supported `v1` layout for stronger
+commit/recovery semantics and lazy directory parsing. See:
 - `docs/V1_EXTENSION_SPEC.md`
-- `docs/MIGRATION.md`
 
 ---
 
@@ -189,7 +188,7 @@ struct HeaderV1 {
   u32  dir_crc32;       // CRC32 of active Directory blob (same as footer.crc32)
   u64  journal_offset;  // 0 in v1 unless journal is implemented
   u64  journal_size;    // 0 in v1 unless journal is implemented
-  u8   reserved[56];    // v1 baseline: zero; readers MUST ignore contents (see extension profile in §17)
+  u8   reserved[56];    // historical baseline: zero; current go-fbx profile defines fields in §17
 }
 ```
 
@@ -211,10 +210,10 @@ A reader MUST validate:
 | Bit | Name | Meaning |
 |---:|---|---|
 | 0 | HAS_JOURNAL | Journal region is present and may be used for safer commits |
-| 1 | HAS_BACKUP | Fixed backup header semantics are enabled (extension profile) |
-| 2 | HAS_DIR_INDEX | `IDX1` directory index is required for open (extension profile) |
-| 3 | HAS_REQUIRED_FEATURES | required-feature mask in `reserved[52:56]` is active (extension profile) |
-| 4..31 | RESERVED | MUST be 0 unless an extension profile defines them |
+| 1 | HAS_BACKUP | Fixed backup header semantics are enabled in the current go-fbx profile |
+| 2 | HAS_DIR_INDEX | `IDX1` directory index is required for open in the current go-fbx profile |
+| 3 | HAS_REQUIRED_FEATURES | required-feature mask in `reserved[52:56]` is active in the current go-fbx profile |
+| 4..31 | RESERVED | MUST be 0 unless a later profile defines them |
 
 > Note: The base append-only commit procedure in this document is safe without journal (see §11.6). Journal support is OPTIONAL.
 
@@ -604,14 +603,12 @@ FBX v1 provides integrity (CRC32) but not cryptographic authenticity.
   - `reserved[8:16]` (`u64`, little-endian): `dead_bytes` (estimated obsolete chunk bytes).
   - `reserved[16:24]` (`u64`, little-endian): `churn_ops` (replace/remove-like operations that created obsolete data).
   - these values are advisory; they MUST NOT affect correctness of parsing/extraction.
-- `go-fbx` extension profile (same `Header.version = 1`) additionally defines:
+- `go-fbx` canonical `v1` profile (same `Header.version = 1`) additionally defines:
   - strict journal + backup commit semantics (`HAS_JOURNAL`, `HAS_BACKUP`);
   - `IDX1` directory offsets/hash table for lazy parse (`HAS_DIR_INDEX`);
   - required feature bitmask contract (`HAS_REQUIRED_FEATURES`);
-  - conversion/migration rules without payload rewrite.
-- Extension profile details are specified in:
+- Canonical profile details are specified in:
   - `docs/V1_EXTENSION_SPEC.md`
-  - `docs/MIGRATION.md`
 - Future versions may still add encryption/deduplication/indexing.
 - Version changes MUST increment `HeaderV1.version`.
 
@@ -1248,7 +1245,7 @@ FBX file (append-only)
 | [ChunkRecordV1]...
 | [old DirectoryV1 blobs]...
 | [new active DirectoryV1 blob]
-| [IDX1 directory index blob]          (extension profile)
+| [IDX1 directory index blob]          (current go-fbx profile)
 | [JNL1 header-snapshot record] (commit-time)
 | [BKP1 header-snapshot record] (commit-time)
 

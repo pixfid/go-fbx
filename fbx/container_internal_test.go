@@ -160,6 +160,7 @@ func TestReadEntriesByHeaderRejectsOversizedDirectoryBlob(t *testing.T) {
 		DirOffset:  format.HeaderSize,
 		DirSize:    maxDirectoryBlobSize + 1,
 	}
+	markCanonicalHeaderForTest(&h)
 	if _, err := readEntriesByHeader(f, h); !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
@@ -220,6 +221,7 @@ func TestOpenReturnsLimitExceededFromPrimaryHeader(t *testing.T) {
 		DirOffset:  format.HeaderSize,
 		DirSize:    maxDirectoryBlobSize + 1,
 	}
+	markCanonicalHeaderForTest(&h)
 	hb, _ := h.MarshalBinary()
 	if _, err := f.WriteAt(hb, 0); err != nil {
 		_ = f.Close()
@@ -236,6 +238,18 @@ func TestOpenReturnsLimitExceededFromPrimaryHeader(t *testing.T) {
 	if _, err := Open(path, nil); !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("expected ErrLimitExceeded, got %v", err)
 	}
+}
+
+func markCanonicalHeaderForTest(h *format.HeaderV1) {
+	h.Flags |= format.HeaderFlagHasJournal
+	h.Flags |= format.HeaderFlagHasBackup
+	h.Flags |= format.HeaderFlagHasDirIndex
+	h.Flags |= format.HeaderFlagHasRequiredFeatures
+	h.JournalOffset = 1
+	h.JournalSize = journalRecordSize
+	markHeaderV1ExtensionLayout(h)
+	writeHeaderDirIndexPointer(h, dirIndexPointer{offset: 1, size: 1, crc32: 1})
+	writeHeaderRequiredFeaturesLow(h, requiredFeaturesSupported)
 }
 
 func TestEntryReaderHonorsChunkAndEntryLimits(t *testing.T) {

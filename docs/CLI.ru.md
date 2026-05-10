@@ -14,7 +14,6 @@
 - `replace-text` — массовая замена байтовой строки в подходящих записях.
 - `extract` — потоковая выгрузка одной записи.
 - `verify` — проверка целостности.
-- `migrate` — append-only апгрейд legacy-контейнера к расширенному layout `v1`.
 
 ## Общая семантика
 - Коды выхода:
@@ -337,23 +336,3 @@ fbx verify [flags] <container.fbx>
 - `all`: directory + все чанки.
 
 Вывод: `entries_checked=<n> chunks_checked=<n> errors=<n>`.
-
-## `migrate`
-Синтаксис:
-```bash
-fbx migrate [flags] <container.fbx>
-```
-
-Флаги:
-
-| Флаг | По умолчанию | Что делает | Зачем использовать |
-|---|---:|---|---|
-| `--verify-source dir\|sample\|all` | `dir` | Глубина preflight-проверки исходного snapshot. | Поймать повреждения до записи миграции. |
-| `--verify-target` | `true` | После commit выполняет полную verify (`all`). | Подтвердить целостность мигрированного snapshot. |
-| `--dry-run` | `false` | Делает только preflight verify, без записи контейнера. | Проверка готовности миграции в CI/скриптах. |
-
-Вывод:
-- обычный запуск: `migration=ok`
-- dry-run: `migration_dry_run=ok`
-
-См. также: [MIGRATION.md](./MIGRATION.md).

@@ -3,7 +3,7 @@
 Последнее обновление: 2026-03-09
 
 ## Общее
-- Реализовано: ядро библиотеки FBX v1 + CLI + ZIP->FBX + pack + verify + векторы совместимости + journal recovery + профиль расширения v1 (`IDX1`) + миграция legacy-контейнеров.
+- Реализовано: ядро библиотеки FBX v1 + CLI + ZIP->FBX + pack + verify + векторы совместимости + journal recovery + канонический профиль `v1` (`IDX1`, required-features).
 - Статус тестов: `go test ./...` проходит.
 
 ## Матрица покрытия RFC
@@ -19,8 +19,7 @@
 | §12 Массовые операции | Реализовано | `RemoveMany`, `RemovePrefix`, `RemoveGlob`, `RemoveWhere`. |
 | §13 Уплотнение (`pack`) | Реализовано | In-place и out-of-place pack через API/CLI. |
 | §14 Верификация (`verify`) | Реализовано | Режимы `dir`, `sample`, `all` в API/CLI. |
-| Профиль расширения v1 (`HAS_DIR_INDEX`, required-features) | Реализовано | Активны `IDX1` commit/open path и extension-поля заголовка. |
-| Миграция legacy (`migrate`) | Реализовано | Append-only миграция метаданных без перепаковки payload; покрыто API + CLI. |
+| Канонический профиль `v1` (`HAS_DIR_INDEX`, required-features) | Реализовано | `IDX1` и обязательные поля заголовка требуются для поддерживаемых snapshot'ов. |
 | §15 Обработка ошибок | Реализовано | Публичные типизированные ошибки (`ErrNotFound`, `ErrCRCMismatch` и т.д.). |
 | §16 Безопасность | В основном реализовано | Валидация путей, потоковый I/O, лимиты (`MaxEntrySize`, `MaxChunkSize`), лимиты памяти/окна декодера ZSTD. |
 | §18 Референсная архитектура/API/CLI | В основном реализовано | Реализованы базовый API и основные CLI-команды. |
@@ -42,4 +41,4 @@
 - ZSTD — pure-Go (`klauspost/compress`), доступен без cgo.
 - LZ4 — pure-Go (`pierrec/lz4/v4`), доступен без cgo.
 - Детект текста и heuristic "already-compressed" — best-effort, основаны на расширении и magic bytes.
-- Fixed backup slot гарантирован для контейнеров, созданных текущим layout; legacy-контейнеры восстанавливаются через journal/backup records.
+- Fixed backup slot гарантирован для контейнеров, созданных текущим layout.

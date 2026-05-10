@@ -2,13 +2,11 @@
 
 Эта реализация следует `FBX_RFC_BinarySpec_GoDoc_v1.md`.
 
-Примечание: здесь описан baseline `v1`, но текущие writer'ы `go-fbx` работают с
-несовместимым профилем расширения `v1` (`HAS_JOURNAL`, backup-header contract,
-`IDX1` lazy parsing, required-features contract).
+Текущий `go-fbx` использует один канонический layout `v1` с `HAS_JOURNAL`,
+backup-header contract, `IDX1` lazy parsing и required-features contract.
 
 См.:
 - [V1_EXTENSION_SPEC.md](./V1_EXTENSION_SPEC.md)
-- [MIGRATION.md](./MIGRATION.md)
 
 ## Модель на диске
 - Header (`HDR1`) по смещению `0`.
@@ -36,8 +34,8 @@ Commit никогда не переписывает существующие pay
 Если валидация primary header/directory не проходит:
 1. Попытка чтения fixed backup header.
 2. Сканирование хвоста файла (`JNL1`/`BKP1`) и выбор последнего валидного snapshot по timestamp.
-3. Сканирование файла на валидные snapshot'ы `DIR1 ... END1` и синтез header по самому новому валидному directory.
-4. Перезапись восстановленного header в offset `0`.
+3. Сканирование файла на валидные snapshot'ы `DIR1 ... END1` и сборка in-memory snapshot по самому новому валидному directory.
+4. Следующий успешный commit заново записывает канонические backup/primary header'ы.
 
 Если все источники восстановления невалидны, `Open` возвращает `ErrInvalidFormat`.
 
